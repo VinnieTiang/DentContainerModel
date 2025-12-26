@@ -241,3 +241,146 @@ def create_dent_overlay(rgb_image: np.ndarray, dent_mask: np.ndarray,
     
     return result_uint8
 
+
+def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray, 
+                           pixel_to_cm: float = None,
+                           depth_units: str = 'meters') -> dict:
+    """
+    Calculate dent metrics including area and maximum depth.
+    
+    IMPORTANT: Real-world area computation requires camera calibration information.
+    Without proper calibration, area values are NOT physically meaningful.
+    
+    Args:
+        depth_map: Original depth map (H, W) as numpy array
+        dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+        pixel_to_cm: Conversion factor from pixels to cm (REQUIRED for area computation).
+                     If None, area computation will be refused.
+                     
+                     To obtain this value, you need ONE of the following:
+                     1. Camera calibration: focal_length (mm) / sensor_width (mm) * distance_to_object (mm) / image_width (pixels)
+                     2. Reference object: Measure a known object in the image and calculate pixels_per_cm
+                     3. Manual calibration: Place a ruler or known-size object and measure pixels per cm
+                     
+                     WARNING: Using an uncalibrated value will produce incorrect area measurements.
+        depth_units: Units of depth_map values. Options: 'meters', 'mm', 'cm', 'inches'
+                     Used to convert depth differences to mm. Default: 'meters'
+        
+    Returns:
+        Dictionary with metrics:
+        - area_cm2: Total dent area in cm² (None if pixel_to_cm not provided)
+        - area_valid: Boolean indicating if area computation is physically valid
+        - max_depth_mm: Maximum depth difference in mm
+        - num_defects: Number of separate dent regions
+        - avg_depth_mm: Average depth difference in mm
+        - pixel_count: Number of pixels in dent regions (always available)
+        - missing_info: List of missing information needed for valid area computation
+    """
+    missing_info = []
+    
+    # Validate pixel_to_cm for area computation
+    area_valid = False
+    if pixel_to_cm is None:
+        missing_info.append("pixel_to_cm conversion factor (required for area computation)")
+    elif pixel_to_cm <= 0:
+        missing_info.append("pixel_to_cm must be positive (invalid value provided)")
+    elif pixel_to_cm > 10:  # Sanity check: >10 cm/pixel seems unreasonable for typical setups
+        missing_info.append(f"pixel_to_cm value ({pixel_to_cm}) seems unusually large - please verify calibration")
+        area_valid = False  # Flag as suspicious but don't refuse
+    else:
+        area_valid = True
+    
+    # Ensure masks match dimensions
+    if depth_map.shape != dent_mask.shape:
+        h, w = depth_map.shape
+        dent_mask = cv2.resize(dent_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    
+    # Create binary mask (True for dent regions)
+    dent_binary = (dent_mask > 127).astype(bool)
+    
+    # Count number of separate dent regions (connected components)
+    mask_uint8 = (dent_binary * 255).astype(np.uint8)
+    num_labels, labels = cv2.connectedComponents(mask_uint8)
+    num_defects = num_labels - 1  # Subtract 1 because background is label 0
+    
+    # Calculate pixel count (always available)
+    num_dent_pixels = np.sum(dent_binary)
+    
+    # REFUSE area computation if not physically valid
+    if not area_valid:
+        area_cm2 = None
+    else:
+        # Calculate area in cm²
+        # Area = number of pixels * (pixel_to_cm)^2
+        area_cm2 = num_dent_pixels * (pixel_to_cm ** 2)
+    
+    if not np.any(dent_binary):
+        return {
+            'area_cm2': area_cm2,
+            'area_valid': area_valid,
+            'max_depth_mm': 0.0,
+            'num_defects': 0,
+            'avg_depth_mm': 0.0,
+            'pixel_count': num_dent_pixels,
+            'missing_info': missing_info
+        }
+    
+    # Calculate depth metrics
+    # Get depth values in dent regions
+    dent_depths = depth_map[dent_binary]
+    valid_depths = dent_depths[np.isfinite(dent_depths) & (dent_depths > 0)]
+    
+    if len(valid_depths) == 0:
+        return {
+            'area_cm2': area_cm2,
+            'area_valid': area_valid,
+            'max_depth_mm': 0.0,
+            'num_defects': num_defects,
+            'avg_depth_mm': 0.0,
+            'pixel_count': num_dent_pixels,
+            'missing_info': missing_info
+        }
+    
+    # Get reference depth (median of non-dent regions)
+    non_dent_binary = ~dent_binary
+    if np.any(non_dent_binary):
+        non_dent_depths = depth_map[non_dent_binary]
+        valid_non_dent = non_dent_depths[np.isfinite(non_dent_depths) & (non_dent_depths > 0)]
+        if len(valid_non_dent) > 0:
+            reference_depth = np.median(valid_non_dent)
+        else:
+            reference_depth = np.median(valid_depths)
+    else:
+        reference_depth = np.median(valid_depths)
+    
+    # Calculate depth differences (dents are typically depressions, so depth < reference)
+    depth_differences = reference_depth - valid_depths
+    depth_differences = np.maximum(depth_differences, 0)  # Only positive differences
+    
+    # Convert depth differences to mm based on depth_units
+    depth_conversion_factors = {
+        'meters': 1000.0,  # meters to mm
+        'mm': 1.0,         # already in mm
+        'cm': 10.0,        # cm to mm
+        'inches': 25.4     # inches to mm
+    }
+    
+    if depth_units not in depth_conversion_factors:
+        missing_info.append(f"Unknown depth_units '{depth_units}'. Assuming meters.")
+        conversion_factor = 1000.0
+    else:
+        conversion_factor = depth_conversion_factors[depth_units]
+    
+    max_depth_mm = np.max(depth_differences) * conversion_factor if depth_differences.size > 0 else 0.0
+    avg_depth_mm = np.mean(depth_differences) * conversion_factor if depth_differences.size > 0 else 0.0
+    
+    return {
+        'area_cm2': area_cm2,
+        'area_valid': area_valid,
+        'max_depth_mm': max_depth_mm,
+        'num_defects': num_defects,
+        'avg_depth_mm': avg_depth_mm,
+        'pixel_count': num_dent_pixels,
+        'missing_info': missing_info
+    }
+
