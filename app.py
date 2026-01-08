@@ -14,6 +14,7 @@ from PIL import Image
 from datetime import datetime
 import json
 from model_architecture import AttentionUNet, predict_mask, preprocess_depth, create_dent_overlay, calculate_dent_metrics
+from panel_extractor import RANSACPanelExtractor, DEFAULT_CLOSING_KERNEL_SIZE, DEFAULT_CAMERA_FOV, DEFAULT_DOWNSAMPLE_FACTOR
 
 # Page configuration
 st.set_page_config(
@@ -175,6 +176,12 @@ if 'history' not in st.session_state:
     st.session_state.history = []
 if 'container_id_counter' not in st.session_state:
     st.session_state.container_id_counter = 1
+if 'ransac_cleaned_depth' not in st.session_state:
+    st.session_state.ransac_cleaned_depth = None
+if 'ransac_panel_mask' not in st.session_state:
+    st.session_state.ransac_panel_mask = None
+if 'ransac_stats' not in st.session_state:
+    st.session_state.ransac_stats = None
 
 # Header
 st.markdown('<div class="main-header">📦 Dent Container Detection System</div>', unsafe_allow_html=True)
@@ -193,7 +200,7 @@ with st.sidebar:
     )
     
     # Or use default path
-    default_model_path = "best_attention_unet.pth"
+    default_model_path = "best_attention_unet_4.pth"
     use_default = st.checkbox("Use default model path", value=True)
     
     if use_default and os.path.exists(default_model_path):
@@ -367,6 +374,85 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # RANSAC Panel Extraction Settings
+    st.subheader("🔄 RANSAC Panel Extraction (Optional)")
+    use_ransac = st.checkbox(
+        "Enable RANSAC panel extraction",
+        value=True,
+        help="Extract container panel using RANSAC plane fitting before inference. "
+             "Recommended for raw depth maps with background noise."
+    )
+    
+    if use_ransac:
+        camera_fov = st.slider(
+            "Camera FOV (degrees)",
+            min_value=30.0,
+            max_value=120.0,
+            value=DEFAULT_CAMERA_FOV,
+            step=5.0,
+            help="Camera field of view for point cloud conversion"
+        )
+        adaptive_threshold = st.checkbox(
+            "Adaptive residual threshold",
+            value=True,
+            help="Automatically tune threshold based on corrugation depth"
+        )
+        residual_threshold = None
+        if not adaptive_threshold:
+            residual_threshold = st.slider(
+                "Residual Threshold (meters)",
+                min_value=0.005,
+                max_value=0.1,
+                value=0.02,
+                step=0.005,
+                help="Maximum distance from plane to be considered an inlier"
+            )
+        downsample_factor = st.slider(
+            "Downsample Factor",
+            min_value=1,
+            max_value=8,
+            value=DEFAULT_DOWNSAMPLE_FACTOR,
+            step=1,
+            help="Downsample factor for faster RANSAC (higher = faster but less accurate)"
+        )
+        
+        # Morphological Closing Settings
+        st.markdown("**Morphological Closing (Fill Holes):**")
+        apply_morphological_closing = st.checkbox(
+            "Apply morphological closing",
+            value=True,
+            help="Fill small holes (dents) in the panel mask. "
+                 "RANSAC may reject deep dents as outliers; closing fills them back in."
+        )
+        closing_kernel_size = st.slider(
+            "Closing Kernel Size (pixels)",
+            min_value=5,
+            max_value=50,
+            value=DEFAULT_CLOSING_KERNEL_SIZE,
+            step=2,
+            help=f"Size of the closing kernel. Larger values fill larger holes, "
+                 f"but may merge separate dents. Default: {DEFAULT_CLOSING_KERNEL_SIZE} pixels"
+        ) if apply_morphological_closing else DEFAULT_CLOSING_KERNEL_SIZE
+        
+        # Rectangular Mask Enforcement
+        force_rectangular_mask = st.checkbox(
+            "Enforce rectangular panel mask",
+            value=True,
+            help="Find the largest contour and draw its rotated bounding box. "
+                 "This ensures deep dents inside the panel boundary are included. "
+                 "Recommended for panels with large dents."
+        )
+    else:
+        camera_fov = DEFAULT_CAMERA_FOV
+        adaptive_threshold = True
+        residual_threshold = None
+        downsample_factor = DEFAULT_DOWNSAMPLE_FACTOR
+        apply_morphological_closing = True
+        closing_kernel_size = DEFAULT_CLOSING_KERNEL_SIZE
+        force_rectangular_mask = True
+    
+    st.markdown("---")
+    
     # Overlay Settings
     st.subheader("🎨 Overlay Settings")
     overlay_alpha = st.slider(
@@ -420,8 +506,28 @@ with col1:
             # Load depth map
             depth_map = np.load(uploaded_depth)
             
+            # Convert to float32 for better precision (especially important for float16 inputs)
+            original_dtype = depth_map.dtype
+            if depth_map.dtype == np.float16:
+                st.warning("⚠️ Float16 detected. Converting to float32 for better precision. Small depth variations may have been lost.")
+            depth_map = depth_map.astype(np.float32)
+            
+            # Check resolution and provide guidance
+            h, w = depth_map.shape[:2]
+            total_pixels = h * w
+            if total_pixels > 1_000_000:  # > 1MP (e.g., 1000x1000 or 720x1280)
+                st.info(f"ℹ️ Large image detected ({h}x{w} = {total_pixels:,} pixels). "
+                       f"Processing may take longer and use more memory. "
+                       f"The model supports any resolution, but performance may vary if training resolution was different.")
+            
+            # Check minimum size requirement (model has 4 pooling levels = divide by 16)
+            min_dim = min(h, w)
+            if min_dim < 16:
+                st.error(f"❌ Image too small! Minimum dimension is 16 pixels (after 4 pooling levels). "
+                        f"Current: {h}x{w}")
+            
             st.success(f"✅ Depth map loaded: {uploaded_depth.name}")
-            st.info(f"Shape: {depth_map.shape}, Dtype: {depth_map.dtype}")
+            st.info(f"Shape: {depth_map.shape}, Original Dtype: {original_dtype}, Converted to: {depth_map.dtype}")
             
             # Display depth map
             st.subheader("Input Depth Map")
@@ -432,16 +538,91 @@ with col1:
             plt.colorbar(im, ax=ax, fraction=0.046)
             st.pyplot(fig)
             
-            # Store in session state
+            # Store in session state (as float32)
             st.session_state.depth_map = depth_map
             st.session_state.depth_filename = uploaded_depth.name
+            
+            # Show RANSAC-extracted panel if RANSAC is enabled
+            if use_ransac:
+                try:
+                    with st.spinner("Extracting panel using RANSAC..."):
+                        extractor = RANSACPanelExtractor(
+                            camera_fov=camera_fov,
+                            residual_threshold=residual_threshold if residual_threshold else 0.02,
+                            adaptive_threshold=adaptive_threshold,
+                            downsample_factor=downsample_factor,
+                            apply_morphological_closing=apply_morphological_closing,
+                            closing_kernel_size=closing_kernel_size,
+                            force_rectangular_mask=force_rectangular_mask
+                        )
+                        # Extract panel and fill background
+                        cleaned_depth, panel_mask, ransac_stats = extractor.extract_panel(
+                            depth_map, 
+                            fill_background=True
+                        )
+                        
+                        # Store in session state for later use
+                        st.session_state.ransac_cleaned_depth = cleaned_depth
+                        st.session_state.ransac_panel_mask = panel_mask
+                        st.session_state.ransac_stats = ransac_stats
+                    
+                    # Display RANSAC results
+                    st.subheader("🔄 RANSAC-Extracted Panel")
+                    
+                    # Statistics
+                    col_stat1, col_stat2, col_stat3 = st.columns(3)
+                    with col_stat1:
+                        st.metric("Panel Coverage", f"{ransac_stats['plane_percentage']:.1f}%")
+                    with col_stat2:
+                        st.metric("Panel Pixels", f"{ransac_stats['plane_pixel_count']:,}")
+                    with col_stat3:
+                        st.metric("Threshold", f"{ransac_stats['residual_threshold_used']*1000:.1f} mm")
+                    
+                    # Display panel mask and cleaned depth side by side
+                    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+                    
+                    # Panel mask
+                    im1 = axes[0].imshow(panel_mask, cmap='gray', vmin=0, vmax=1)
+                    axes[0].set_title("Panel Mask (White = Panel)")
+                    axes[0].axis('off')
+                    plt.colorbar(im1, ax=axes[0], fraction=0.046)
+                    
+                    # Cleaned depth map
+                    im2 = axes[1].imshow(cleaned_depth, cmap='viridis')
+                    axes[1].set_title("Cleaned Depth Map (Background Filled)")
+                    axes[1].axis('off')
+                    plt.colorbar(im2, ax=axes[1], fraction=0.046)
+                    
+                    st.pyplot(fig)
+                    
+                    # Additional info
+                    if 'plane_median_depth' in ransac_stats:
+                        st.info(f"ℹ️ Panel median depth: {ransac_stats['plane_median_depth']:.4f} m | "
+                               f"Fill method: {ransac_stats.get('fill_method', 'median')}")
+                    
+                except Exception as e:
+                    st.warning(f"⚠️ RANSAC extraction failed: {str(e)}")
+                    st.session_state.ransac_cleaned_depth = None
+                    st.session_state.ransac_panel_mask = None
+                    st.session_state.ransac_stats = None
+            else:
+                # Clear RANSAC results if disabled
+                st.session_state.ransac_cleaned_depth = None
+                st.session_state.ransac_panel_mask = None
+                st.session_state.ransac_stats = None
             
         except Exception as e:
             st.error(f"❌ Error loading depth map: {str(e)}")
             st.session_state.depth_map = None
+            st.session_state.ransac_cleaned_depth = None
+            st.session_state.ransac_panel_mask = None
+            st.session_state.ransac_stats = None
     else:
         st.info("👆 Please upload a depth map (.npy file)")
         st.session_state.depth_map = None
+        st.session_state.ransac_cleaned_depth = None
+        st.session_state.ransac_panel_mask = None
+        st.session_state.ransac_stats = None
     
     # Display RGB image if uploaded
     if uploaded_rgb is not None:
@@ -488,12 +669,27 @@ with col2:
         else:
             try:
                 with st.spinner("Running inference..."):
-                    # Run inference
+                    # Create RANSAC extractor if enabled
+                    ransac_extractor = None
+                    if use_ransac:
+                        ransac_extractor = RANSACPanelExtractor(
+                            camera_fov=camera_fov,
+                            residual_threshold=residual_threshold if residual_threshold else 0.02,
+                            adaptive_threshold=adaptive_threshold,
+                            downsample_factor=downsample_factor,
+                            apply_morphological_closing=apply_morphological_closing,
+                            closing_kernel_size=closing_kernel_size,
+                            force_rectangular_mask=force_rectangular_mask
+                        )
+                    
+                    # Run inference (preprocess_depth will call panel_extractor if use_ransac=True)
                     binary_mask, prob_mask = predict_mask(
                         st.session_state.model,
                         st.session_state.depth_map,
                         device=str(st.session_state.device),
-                        threshold=threshold
+                        threshold=threshold,
+                        use_ransac=use_ransac,
+                        ransac_extractor=ransac_extractor
                     )
                     
                     # Store results
