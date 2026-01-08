@@ -669,27 +669,26 @@ with col2:
         else:
             try:
                 with st.spinner("Running inference..."):
-                    # Create RANSAC extractor if enabled
-                    ransac_extractor = None
+                    # Use pre-computed RANSAC results from session state if RANSAC was enabled
+                    # RANSAC is already computed when depth map is uploaded (see above)
+                    depth_cleaned_precomputed = None
+                    panel_mask_precomputed = None
                     if use_ransac:
-                        ransac_extractor = RANSACPanelExtractor(
-                            camera_fov=camera_fov,
-                            residual_threshold=residual_threshold if residual_threshold else 0.02,
-                            adaptive_threshold=adaptive_threshold,
-                            downsample_factor=downsample_factor,
-                            apply_morphological_closing=apply_morphological_closing,
-                            closing_kernel_size=closing_kernel_size,
-                            force_rectangular_mask=force_rectangular_mask
-                        )
+                        if st.session_state.ransac_cleaned_depth is not None:
+                            # Use pre-computed RANSAC results from session state
+                            depth_cleaned_precomputed = st.session_state.ransac_cleaned_depth
+                            panel_mask_precomputed = st.session_state.ransac_panel_mask
+                        else:
+                            st.warning("⚠️ RANSAC enabled but no pre-computed results found. Please upload depth map again or disable RANSAC.")
                     
-                    # Run inference (preprocess_depth will call panel_extractor if use_ransac=True)
+                    # Run inference (uses pre-computed RANSAC results if available)
                     binary_mask, prob_mask = predict_mask(
                         st.session_state.model,
                         st.session_state.depth_map,
                         device=str(st.session_state.device),
                         threshold=threshold,
-                        use_ransac=use_ransac,
-                        ransac_extractor=ransac_extractor
+                        depth_cleaned=depth_cleaned_precomputed,
+                        panel_mask=panel_mask_precomputed
                     )
                     
                     # Store results

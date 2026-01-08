@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import cv2
 import numpy as np
+from typing import Optional, Tuple
 
 
 class ConvBlock(nn.Module):
@@ -110,35 +111,124 @@ class AttentionUNet(nn.Module):
         return out
 
 
-def preprocess_depth(depth: np.ndarray) -> np.ndarray:
+def preprocess_depth(depth: np.ndarray, 
+                     target_size: Optional[Tuple[int, int]] = None,
+                     depth_cleaned: Optional[np.ndarray] = None,
+                     panel_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Preprocess depth map for model inference.
+    Preprocess depth map for model inference with Hard Masking for background suppression.
     Converts depth map to 3-channel input: [normalized_depth, normalized_gx, normalized_gy]
+    
+    This function matches the ver4 notebook training pipeline:
+    - Uses pre-computed cleaned depth map (RANSAC should be applied BEFORE calling this function)
+    - Normalizes depth to [0.1, 1.0] range (makes wall distinct from 0.0 background)
+    - Computes gradients on cleaned depth (no cliff edges)
+    - Masks gradients to remove background noise
+    - Returns panel mask for hard masking predictions
+    
+    NOTE: RANSAC panel extraction should be done BEFORE calling this function.
+    Use panel_extractor.py to extract panel, then pass the results here.
     
     Args:
         depth: Input depth map (H, W) as numpy array
+               NOTE: Should be converted to float32 BEFORE calling this function (e.g., in app.py before RANSAC).
+                     This function will convert to float32 if not already done, but conversion before RANSAC
+                     is recommended for best precision.
+        target_size: Optional target size (H, W) to resize depth and mask. If None, uses original size.
+        depth_cleaned: Pre-computed cleaned depth map (H, W) with background filled.
+                      If None, uses simple median fill fallback.
+        panel_mask: Pre-computed panel mask (H, W) where 1.0 = panel, 0.0 = background.
+                    If None, creates mask from valid pixels.
         
     Returns:
-        Preprocessed input tensor ready for model (3, H, W)
+        Tuple of (input_tensor, panel_mask)
+        - input_tensor: Preprocessed input tensor ready for model (3, H, W)
+        - panel_mask: Binary panel mask (H, W) where 1.0 = panel, 0.0 = background
+                      Resized to match input_tensor spatial dimensions
     """
-    depth = depth.astype(np.float32)
+    # Convert to float32 for precision (critical for gradient calculations)
+    # NOTE: Conversion should ideally happen BEFORE calling this function (e.g., in app.py before RANSAC)
+    # This is a defensive check - only convert if not already float32
+    if depth.dtype != np.float32:
+        depth = depth.astype(np.float32)
+    original_shape = depth.shape[:2]  # (H, W)
     
-    # 1. Normalize depth (0-1)
-    valid = np.isfinite(depth) & (depth > 0)
-    if np.any(valid):
-        dmin, dmax = float(depth[valid].min()), float(depth[valid].max())
-        denom = dmax - dmin
-        if denom < 1e-8:
-            denom = 1e-8
-        depth_n = (depth - dmin) / denom
+    # --- STEP 1: Use pre-computed cleaned depth and panel mask ---
+    # RANSAC should be applied BEFORE calling this function (e.g., in app.py or by caller)
+    if depth_cleaned is not None and panel_mask is not None:
+        # Use pre-computed RANSAC results
+        depth_cleaned = depth_cleaned.astype(np.float32)
+        panel_mask = panel_mask.astype(np.float32)
+        
+        # Verify shapes match
+        if depth_cleaned.shape != depth.shape:
+            raise ValueError(f"Pre-computed depth_cleaned shape {depth_cleaned.shape} doesn't match depth shape {depth.shape}")
+        if panel_mask.shape != depth.shape:
+            raise ValueError(f"Pre-computed panel_mask shape {panel_mask.shape} doesn't match depth shape {depth.shape}")
     else:
-        depth_n = np.zeros_like(depth, dtype=np.float32)
+        # Fallback: Simple median fill if RANSAC results not provided
+        # This is a fallback for cases where RANSAC wasn't applied
+        valid_original = np.isfinite(depth) & (depth > 0)
+        if not np.any(valid_original):
+            # Fallback for empty images
+            empty_mask = np.zeros((depth.shape[0], depth.shape[1]), dtype=np.float32)
+            return np.zeros((3, depth.shape[0], depth.shape[1]), dtype=np.float32), empty_mask
+        
+        d_med = np.median(depth[valid_original])
+        depth_cleaned = depth.copy()
+        depth_cleaned[~valid_original] = d_med
+        
+        # Create a simple panel mask (all valid pixels = panel)
+        panel_mask = valid_original.astype(np.float32)
     
-    # 2. Compute gradients
-    gx = cv2.Sobel(depth, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(depth, cv2.CV_32F, 0, 1, ksize=3)
+    # --- STEP 2: Resize depth and mask to target size if specified ---
+    if target_size is not None:
+        target_h, target_w = target_size
+        # Resize depth_cleaned for gradient computation
+        depth_cleaned = cv2.resize(depth_cleaned, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        # Resize panel_mask using NEAREST to keep it binary (0 or 1)
+        panel_mask = cv2.resize(panel_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        # Ensure mask is binary (0.0 or 1.0)
+        panel_mask = (panel_mask > 0.5).astype(np.float32)
+        # Resize original depth for normalization (use LINEAR for depth values)
+        depth_for_norm = cv2.resize(depth, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        current_shape = (target_h, target_w)
+    else:
+        depth_for_norm = depth
+        current_shape = original_shape
     
-    # 3. Robust normalization for gradients
+    # --- STEP 3: Compute normalization stats from ORIGINAL depth (before filling) ---
+    # CRITICAL: We need to compute normalization stats from ORIGINAL depth (before filling)
+    # to match the notebook training pipeline exactly.
+    # This ensures the normalization range is computed from original valid pixels only,
+    # not including the median-filled background pixels.
+    # Use depth_for_norm (which is original depth, possibly resized)
+    valid_original = np.isfinite(depth_for_norm) & (depth_for_norm > 0)
+    if not np.any(valid_original):
+        # Fallback for empty images
+        return np.zeros((3, current_shape[0], current_shape[1]), dtype=np.float32), panel_mask
+    
+    # Get min/max from ORIGINAL valid pixels (for normalization)
+    d_valid_original = depth_for_norm[valid_original]
+    d_min = np.min(d_valid_original)
+    d_max = np.max(d_valid_original)
+    range_val = d_max - d_min
+    if range_val < 1e-6:
+        range_val = 1.0
+    
+    # --- STEP 4: Normalize Depth Channel to [0.1, 1.0] ---
+    # Map valid range to [0.1, 1.0] (makes Wall distinct from 0.0 background)
+    # CRITICAL: Normalize using ORIGINAL depth values (resized if target_size specified)
+    depth_n = np.zeros_like(depth_for_norm)
+    # Formula: 0.1 + 0.9 * (val - min) / (max - min)
+    depth_n[valid_original] = 0.1 + 0.9 * ((depth_for_norm[valid_original] - d_min) / range_val)
+    
+    # --- STEP 5: Compute Gradients on CLEANED Depth ---
+    # CRITICAL: We use 'depth_cleaned' (with filled background) so Sobel sees a flat plane
+    gx = cv2.Sobel(depth_cleaned, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(depth_cleaned, cv2.CV_32F, 0, 1, ksize=3)
+    
+    # --- STEP 6: Robust Normalization for Gradients ---
     def robust_norm(x):
         v = x.flatten()
         v = v[np.isfinite(v)]
@@ -154,40 +244,204 @@ def preprocess_depth(depth: np.ndarray) -> np.ndarray:
     gx_n = robust_norm(gx)
     gy_n = robust_norm(gy)
     
-    # 4. Stack channels: (3, H, W)
+    # --- STEP 7: MASK the Gradients ---
+    # We computed gradients on cleaned data, but we force background to 0.0
+    # for the final network input (removes background noise).
+    valid_mask = (depth_n > 0).astype(np.float32)
+    gx_n = gx_n * valid_mask
+    gy_n = gy_n * valid_mask
+    
+    # --- STEP 8: Stack channels ---
     inp = np.stack([depth_n, gx_n, gy_n], axis=0).astype(np.float32)
     
-    return inp
+    return inp, panel_mask
 
 
-def predict_mask(model: nn.Module, depth: np.ndarray, device: str = 'cpu', threshold: float = 0.5) -> np.ndarray:
+def _aggressive_internal_fill(binary_mask: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
     """
-    Run inference on a depth map to generate binary segmentation mask.
+    Aggressively fill black pixels inside white regions regardless of depth.
+    This catches any remaining black lines that weren't filled by morphological operations.
+    
+    Args:
+        binary_mask: Binary mask (H, W) where 255 = dent, 0 = background
+        valid_mask: Valid region mask (H, W) where True = valid panel area
+        
+    Returns:
+        Binary mask with internal black pixels filled
+    """
+    # Convert to binary (0 or 1) for processing
+    mask_binary = (binary_mask > 127).astype(np.uint8)
+    
+    # Find contours of white (dent) regions
+    contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Create a new mask
+    filled_mask = np.zeros_like(mask_binary)
+    
+    # Fill each contour (this fills holes inside white regions)
+    for contour in contours:
+        if cv2.contourArea(contour) > 0:
+            cv2.fillPoly(filled_mask, [contour], 1)
+    
+    # Only keep filled regions that are within valid_mask
+    filled_mask = filled_mask * valid_mask.astype(np.uint8)
+    
+    # Convert back to 0/255 format
+    return filled_mask.astype(np.uint8) * 255
+
+
+def _fill_holes(binary_mask: np.ndarray) -> np.ndarray:
+    """
+    Fill black holes inside white dented regions using morphological closing.
+    
+    Args:
+        binary_mask: Binary mask (H, W) where 255 = dent, 0 = background
+        
+    Returns:
+        Binary mask with holes filled
+    """
+    # Convert to binary (0 or 1) for morphological operations
+    mask_binary = (binary_mask > 127).astype(np.uint8)
+    
+    # Use morphological closing to fill small holes
+    # Kernel size of 5x5 should catch most small holes
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    filled_mask = cv2.morphologyEx(mask_binary, cv2.MORPH_CLOSE, kernel)
+    
+    # Convert back to 0/255 format
+    return filled_mask.astype(np.uint8) * 255
+
+
+def _filter_thin_components(binary_mask: np.ndarray, min_area: int = 10) -> np.ndarray:
+    """
+    Remove small and thin false-positive regions using connected-component analysis.
+    
+    Args:
+        binary_mask: Binary mask (H, W) where 255 = dent, 0 = background
+        min_area: Minimum area in pixels for a component to be kept (default: 10)
+        
+    Returns:
+        Binary mask with small/thin components removed
+    """
+    # Convert to binary (0 or 1) for connected components
+    mask_binary = (binary_mask > 127).astype(np.uint8)
+    
+    # Find connected components
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_binary, connectivity=8)
+    
+    # Create output mask
+    filtered_mask = np.zeros_like(mask_binary)
+    
+    # Keep only components with area >= min_area
+    # stats format: [x, y, width, height, area]
+    # Index 4 is the area
+    for label_id in range(1, num_labels):  # Skip background (label 0)
+        area = stats[label_id, 4]  # Area is at index 4
+        if area >= min_area:
+            # Keep this component
+            filtered_mask[labels == label_id] = 1
+    
+    # Convert back to 0/255 format
+    return filtered_mask.astype(np.uint8) * 255
+
+
+def predict_mask(model: nn.Module, depth: np.ndarray, device: str = 'cpu', threshold: float = 0.5,
+                 target_size: Optional[Tuple[int, int]] = None,
+                 min_dent_area: int = 200,
+                 depth_cleaned: Optional[np.ndarray] = None,
+                 panel_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Run inference on a depth map to generate binary segmentation mask with Hard Masking.
+    
+    This function implements "Hard Masking" for background suppression:
+    - Uses pre-computed panel mask (RANSAC should be applied BEFORE calling this function)
+    - Runs model inference to get raw probability map
+    - Multiplies probability map by panel_mask to force background predictions to 0.0
+    - Applies post-processing: aggressive fill, hole filling, and component filtering
+    
+    NOTE: RANSAC panel extraction should be done BEFORE calling this function.
+    Use panel_extractor.py to extract panel, then pass the results here.
     
     Args:
         model: Trained AttentionUNet model
         depth: Input depth map (H, W) as numpy array
         device: Device to run inference on ('cpu' or 'cuda')
         threshold: Threshold for binary mask (default 0.5)
+        target_size: Optional target size (H, W) to resize depth and mask. If None, uses original size.
+        min_dent_area: Minimum area in pixels for a dent component to be kept (default: 200)
+        depth_cleaned: Pre-computed cleaned depth map (H, W) with background filled.
+                      If None, uses simple median fill fallback.
+        panel_mask: Pre-computed panel mask (H, W) where 1.0 = panel, 0.0 = background.
+                    If None, creates mask from valid pixels.
         
     Returns:
-        Binary segmentation mask (H, W) as numpy array (0 or 255)
+        Tuple of (binary_mask, prob_mask)
+        - binary_mask: Binary segmentation mask (H, W) as numpy array (0 or 255)
+                      Background areas are forced to 0 via hard masking
+                      Post-processed to fill holes and remove small components
+        - prob_mask: Probability mask (H, W) as numpy array (0.0 to 1.0)
+                     Background areas are forced to 0.0 via hard masking
     """
     model.eval()
+    original_shape = depth.shape[:2]  # (H, W)
     
-    # Preprocess
-    inp = preprocess_depth(depth)
+    # Preprocess depth and get panel mask
+    # RANSAC should be applied BEFORE calling this function (e.g., in app.py)
+    inp, panel_mask = preprocess_depth(
+        depth, 
+        target_size=target_size,
+        depth_cleaned=depth_cleaned,
+        panel_mask=panel_mask
+    )
     
     # Convert to tensor and add batch dimension: (1, 3, H, W)
     inp_tensor = torch.from_numpy(inp).unsqueeze(0).to(device)
     
-    # Inference
+    # Inference - get raw probability map
     with torch.no_grad():
         output = model(inp_tensor)
-        prob_mask = torch.sigmoid(output).cpu().numpy()[0, 0]  # (H, W)
+        raw_prob_mask = torch.sigmoid(output).cpu().numpy()[0, 0]  # (H, W)
+    
+    # --- HARD MASKING: Multiply probability map by panel_mask ---
+    # This forces any prediction in background areas to be exactly 0.0
+    prob_mask = raw_prob_mask * panel_mask
+    
+    # Resize prob_mask back to original size if we resized during preprocessing
+    if target_size is not None and prob_mask.shape != original_shape:
+        prob_mask = cv2.resize(prob_mask, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_LINEAR)
+        # Also resize panel_mask for consistency (though we don't return it)
+        panel_mask_resized = cv2.resize(panel_mask, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_NEAREST)
+        # Re-apply hard masking after resize to ensure background is still 0
+        prob_mask = prob_mask * panel_mask_resized
     
     # Convert to binary mask
     binary_mask = (prob_mask > threshold).astype(np.uint8) * 255
+    
+    # --- POST-PROCESSING: Apply morphological operations to clean up the mask ---
+    # Get valid mask (panel area) for aggressive fill
+    # binary_mask is now at original_shape (after resize if needed)
+    if target_size is not None:
+        # We resized during preprocessing, so use the resized panel_mask
+        # panel_mask_resized was already computed above
+        valid_mask = (panel_mask_resized > 0.5)
+    else:
+        # No resize, panel_mask should match binary_mask shape
+        if panel_mask.shape != binary_mask.shape:
+            # Resize panel_mask to match binary_mask if there's a mismatch
+            panel_mask_for_valid = cv2.resize(panel_mask, (binary_mask.shape[1], binary_mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+            valid_mask = (panel_mask_for_valid > 0.5)
+        else:
+            valid_mask = (panel_mask > 0.5)
+    
+    # Post-morphology aggressive fill: Fill black pixels inside white regions regardless of depth
+    # This catches any remaining black lines that weren't filled by morphological operations
+    binary_mask = _aggressive_internal_fill(binary_mask, valid_mask)
+    
+    # Fill black holes inside white dented regions
+    binary_mask = _fill_holes(binary_mask)
+    
+    # Remove small and thin false-positive regions using connected-component analysis
+    binary_mask = _filter_thin_components(binary_mask, min_area=min_dent_area)
     
     return binary_mask, prob_mask
 
