@@ -601,7 +601,24 @@ with col1:
                                f"Fill method: {ransac_stats.get('fill_method', 'median')}")
                     
                 except Exception as e:
-                    st.warning(f"⚠️ RANSAC extraction failed: {str(e)}")
+                    import traceback
+                    error_msg = str(e)
+                    st.error(f"❌ RANSAC extraction failed: {error_msg}")
+                    
+                    # Provide diagnostic information
+                    valid_pixels = np.sum((depth_map > 0) & np.isfinite(depth_map))
+                    total_pixels = depth_map.size
+                    st.warning(f"📊 Diagnostic: {valid_pixels}/{total_pixels} valid pixels ({100*valid_pixels/total_pixels:.1f}%)")
+                    
+                    if valid_pixels == 0:
+                        st.error("⚠️ No valid depth pixels found! Check your depth map file.")
+                    elif valid_pixels < 100:
+                        st.warning("⚠️ Very few valid pixels. RANSAC may fail with insufficient data.")
+                    
+                    # Show full traceback in expander for debugging
+                    with st.expander("🔍 Show full error details"):
+                        st.code(traceback.format_exc())
+                    
                     st.session_state.ransac_cleaned_depth = None
                     st.session_state.ransac_panel_mask = None
                     st.session_state.ransac_stats = None
