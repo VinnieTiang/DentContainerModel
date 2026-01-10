@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import cv2
 import numpy as np
 from typing import Optional, Tuple
+import json
+from pathlib import Path
 
 
 class ConvBlock(nn.Module):
@@ -223,12 +225,23 @@ def preprocess_depth(depth: np.ndarray,
     # Formula: 0.1 + 0.9 * (val - min) / (max - min)
     depth_n[valid_original] = 0.1 + 0.9 * ((depth_for_norm[valid_original] - d_min) / range_val)
     
-    # --- STEP 5: Compute Gradients on CLEANED Depth ---
-    # CRITICAL: We use 'depth_cleaned' (with filled background) so Sobel sees a flat plane
-    gx = cv2.Sobel(depth_cleaned, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(depth_cleaned, cv2.CV_32F, 0, 1, ksize=3)
+    # --- STEP 5: Normalize CLEANED Depth for Gradient Computation ---
+    # CRITICAL: Match training pipeline - gradients must be computed on NORMALIZED depth
+    # Training computes gradients on normalized filled depth, so we do the same here
+    # Normalize depth_cleaned using the same stats as original depth
+    depth_cleaned_norm = np.zeros_like(depth_cleaned)
+    valid_cleaned = (depth_cleaned > 0) & np.isfinite(depth_cleaned)
+    if np.any(valid_cleaned):
+        # Use same normalization stats (d_min, d_max, range_val) for consistency
+        depth_cleaned_norm[valid_cleaned] = 0.1 + 0.9 * ((depth_cleaned[valid_cleaned] - d_min) / range_val)
     
-    # --- STEP 6: Robust Normalization for Gradients ---
+    # --- STEP 6: Compute Gradients on NORMALIZED CLEANED Depth ---
+    # CRITICAL: Match training exactly - gradients computed on normalized depth (not raw cleaned depth)
+    # This matches the training pipeline where gradients are computed on depth_norm
+    gx = cv2.Sobel(depth_cleaned_norm, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(depth_cleaned_norm, cv2.CV_32F, 0, 1, ksize=3)
+    
+    # --- STEP 7: Robust Normalization for Gradients ---
     def robust_norm(x):
         v = x.flatten()
         v = v[np.isfinite(v)]
@@ -244,14 +257,14 @@ def preprocess_depth(depth: np.ndarray,
     gx_n = robust_norm(gx)
     gy_n = robust_norm(gy)
     
-    # --- STEP 7: MASK the Gradients ---
+    # --- STEP 8: MASK the Gradients ---
     # We computed gradients on cleaned data, but we force background to 0.0
     # for the final network input (removes background noise).
     valid_mask = (depth_n > 0).astype(np.float32)
     gx_n = gx_n * valid_mask
     gy_n = gy_n * valid_mask
     
-    # --- STEP 8: Stack channels ---
+    # --- STEP 9: Stack channels ---
     inp = np.stack([depth_n, gx_n, gy_n], axis=0).astype(np.float32)
     
     return inp, panel_mask
@@ -496,41 +509,132 @@ def create_dent_overlay(rgb_image: np.ndarray, dent_mask: np.ndarray,
     return result_uint8
 
 
-def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray, 
-                           pixel_to_cm: float = None,
-                           depth_units: str = 'meters') -> dict:
+def load_camera_intrinsics(json_path: Optional[str] = None) -> dict:
     """
-    Calculate dent metrics including area and maximum depth.
-    
-    IMPORTANT: Real-world area computation requires camera calibration information.
-    Without proper calibration, area values are NOT physically meaningful.
+    Load camera intrinsics from JSON file.
     
     Args:
-        depth_map: Original depth map (H, W) as numpy array
+        json_path: Path to camera intrinsics JSON file. If None, uses default path.
+        
+    Returns:
+        Dictionary with camera intrinsics: fx, fy, cx, cy, fov_degrees, resolution
+    """
+    if json_path is None:
+        # Default path relative to this file
+        default_path = Path(__file__).parent / "camera_intrinsics_default.json"
+        json_path = str(default_path)
+    
+    try:
+        with open(json_path, 'r') as f:
+            intrinsics = json.load(f)
+        
+        # Extract intrinsics
+        result = {
+            'fx': intrinsics.get('fx'),
+            'fy': intrinsics.get('fy'),
+            'cx': intrinsics.get('cx'),
+            'cy': intrinsics.get('cy'),
+            'fov_degrees': intrinsics.get('fov_degrees', {}),
+            'resolution': intrinsics.get('resolution', {})
+        }
+        
+        return result
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"Warning: Could not load camera intrinsics from {json_path}: {e}")
+        return {}
+
+
+def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray, 
+                           pixel_to_cm: float = None,
+                           depth_units: str = 'meters',
+                           camera_fov: float = None,
+                           focal_length: float = None,
+                           sensor_width: float = None,
+                           intrinsics_json_path: Optional[str] = None,
+                           panel_mask: Optional[np.ndarray] = None) -> dict:
+    """
+    Calculate dent metrics including area and maximum depth using camera intrinsics.
+    
+    IMPORTANT: Real-world area computation requires camera calibration information.
+    Uses camera intrinsics to calculate depth-dependent pixel sizes for accurate area.
+    
+    By default, loads intrinsics from camera_intrinsics_default.json if available.
+    
+    Depth measurement compares dent depth to the median of the normal panel surface
+    (panel regions excluding dent regions).
+    
+    Args:
+        depth_map: Original depth map (H, W) as numpy array in meters
         dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
-        pixel_to_cm: Conversion factor from pixels to cm (REQUIRED for area computation).
-                     If None, area computation will be refused.
-                     
-                     To obtain this value, you need ONE of the following:
-                     1. Camera calibration: focal_length (mm) / sensor_width (mm) * distance_to_object (mm) / image_width (pixels)
-                     2. Reference object: Measure a known object in the image and calculate pixels_per_cm
-                     3. Manual calibration: Place a ruler or known-size object and measure pixels per cm
-                     
-                     WARNING: Using an uncalibrated value will produce incorrect area measurements.
+        pixel_to_cm: Conversion factor from pixels to cm (fallback if intrinsics not provided).
+                     If camera intrinsics are provided, this is ignored in favor of intrinsics-based calculation.
         depth_units: Units of depth_map values. Options: 'meters', 'mm', 'cm', 'inches'
                      Used to convert depth differences to mm. Default: 'meters'
+        camera_fov: Camera field of view in degrees (for intrinsics-based calculation).
+                    If provided along with depth_map dimensions, calculates focal length.
+                    If None, will try to load from intrinsics JSON file.
+        focal_length: Focal length in pixels (alternative to camera_fov).
+                      If provided, uses this directly for intrinsics calculation.
+                      If None, will try to load from intrinsics JSON file (fx or fy).
+        sensor_width: Sensor width in mm (for intrinsics-based calculation).
+                      If None, uses FOV-based approximation.
+        intrinsics_json_path: Path to camera intrinsics JSON file. If None, uses default path.
+        panel_mask: Optional panel mask (H, W) where 1.0 = panel pixels, 0.0 = background.
+                    If provided, uses median of panel regions (excluding dent regions) as reference depth.
+                    If None, falls back to median of non-dent regions.
         
     Returns:
         Dictionary with metrics:
-        - area_cm2: Total dent area in cm² (None if pixel_to_cm not provided)
+        - area_cm2: Total dent area in cm² (calculated using intrinsics if available)
         - area_valid: Boolean indicating if area computation is physically valid
-        - max_depth_mm: Maximum depth difference in mm
+        - max_depth_mm: Maximum depth difference in mm (compared to panel median)
         - num_defects: Number of separate dent regions
-        - avg_depth_mm: Average depth difference in mm
+        - avg_depth_mm: Average depth difference in mm (compared to panel median)
         - pixel_count: Number of pixels in dent regions (always available)
         - missing_info: List of missing information needed for valid area computation
+        - area_method: Method used for area calculation ('intrinsics' or 'pixel_to_cm')
     """
     missing_info = []
+    
+    # Load camera intrinsics from JSON file by default (prioritize over FOV-based calculation)
+    intrinsics = load_camera_intrinsics(intrinsics_json_path)
+    
+    # Use intrinsics from JSON if available (more accurate than FOV-based calculation)
+    if intrinsics.get('fx') is not None:
+        if focal_length is None:
+            # Use fx as focal length (or average of fx and fy if both available)
+            fx = intrinsics['fx']
+            fy = intrinsics.get('fy', fx)
+            focal_length = (fx + fy) / 2.0  # Average focal length
+    
+    if camera_fov is None and intrinsics.get('fov_degrees'):
+        # Use vertical FOV if available, otherwise horizontal
+        fov_dict = intrinsics['fov_degrees']
+        camera_fov = fov_dict.get('vertical') or fov_dict.get('horizontal')
+    
+    # CRITICAL: Detect and convert millimeter values to meters if needed
+    # If max depth > 100, likely still in millimeters (should be < 10m for containers)
+    depth_map_converted = depth_map.copy()
+    if np.nanmax(np.abs(depth_map)) > 100:
+        # Likely still in millimeters - convert to meters
+        depth_map_converted = depth_map_converted / 1000.0
+        # Filter error codes and far background
+        depth_map_converted[depth_map_converted > 3.0] = 0.0
+        depth_map_converted[depth_map_converted < 0] = 0.0
+        missing_info.append("Depth map appeared to be in millimeters - converted to meters for calculation")
+    elif np.nanmax(np.abs(depth_map)) > 10.0:
+        # Values > 10m are likely noise/background for container inspection
+        depth_map_converted[depth_map_converted > 10.0] = 0.0
+        missing_info.append("Filtered depth values > 10m (likely background noise)")
+    
+    # Handle negative values (convert to positive)
+    if np.any(depth_map_converted < 0):
+        depth_map_converted = np.abs(depth_map_converted)
+    
+    # Use converted depth map for all calculations
+    depth_map = depth_map_converted
     
     # Validate pixel_to_cm for area computation
     area_valid = False
@@ -560,13 +664,70 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
     # Calculate pixel count (always available)
     num_dent_pixels = np.sum(dent_binary)
     
-    # REFUSE area computation if not physically valid
-    if not area_valid:
-        area_cm2 = None
-    else:
-        # Calculate area in cm²
-        # Area = number of pixels * (pixel_to_cm)^2
-        area_cm2 = num_dent_pixels * (pixel_to_cm ** 2)
+    # Calculate area using camera intrinsics if available, otherwise use pixel_to_cm
+    area_cm2 = None
+    area_method = None
+    
+    if num_dent_pixels > 0:
+        # Try intrinsics-based calculation first
+        h, w = depth_map.shape
+        
+        # Prioritize focal_length from intrinsics JSON over FOV-based calculation
+        # (intrinsics are more accurate)
+        if focal_length is not None:
+            focal_length_px = focal_length
+        elif camera_fov is not None:
+            # Fallback: Calculate focal length from FOV
+            fov_y_rad = np.deg2rad(camera_fov)
+            focal_length_px = (h / 2.0) / np.tan(fov_y_rad / 2.0)
+        else:
+            focal_length_px = None
+        
+        # Calculate area using intrinsics (depth-dependent pixel size)
+        if focal_length_px is not None:
+            # Get depths for dent pixels
+            dent_depths_for_area = depth_map[dent_binary]
+            valid_depths_for_area = dent_depths_for_area[np.isfinite(dent_depths_for_area) & (dent_depths_for_area > 0)]
+            
+            if len(valid_depths_for_area) > 0:
+                # Calculate pixel size at each depth using camera intrinsics
+                # Using pinhole camera model: pixel_size_m = depth / focal_length_px
+                # This gives the physical size of one pixel at that depth in meters
+                pixel_size_at_depth_m = valid_depths_for_area / focal_length_px
+                
+                # If sensor_width is provided, use more accurate calculation
+                if sensor_width is not None:
+                    # Convert sensor_width from mm to meters
+                    sensor_width_m = sensor_width / 1000.0
+                    # Focal length in meters (from sensor geometry)
+                    # focal_length_m = (sensor_width_m * focal_length_px) / w
+                    # More accurate: pixel_size = depth * (sensor_width_m / focal_length_m) / w
+                    # But we can simplify using the relationship: focal_length_px / w ≈ focal_length_m / sensor_width_m
+                    # So: pixel_size_m = depth * sensor_width_m / (focal_length_px * w / focal_length_px * sensor_width_m / w)
+                    # Simplified: pixel_size_m = depth * sensor_width_m / (focal_length_px * w) * w
+                    # Actually: pixel_size_m = depth * sensor_width_m / (focal_length_m * w)
+                    # Where focal_length_m = sensor_width_m * focal_length_px / w
+                    focal_length_m = (sensor_width_m * focal_length_px) / w
+                    pixel_size_at_depth_m = valid_depths_for_area * (sensor_width_m / (focal_length_m * w))
+                
+                # Convert pixel size from meters to cm
+                pixel_size_cm = pixel_size_at_depth_m * 100.0
+                
+                # Calculate area for each pixel and sum
+                pixel_area_cm2 = pixel_size_cm ** 2
+                area_cm2 = np.sum(pixel_area_cm2)
+                area_method = 'intrinsics'
+                area_valid = True
+        
+        # Fallback to pixel_to_cm if intrinsics not available
+        if area_cm2 is None and area_valid and pixel_to_cm is not None:
+            # Calculate area in cm² using constant pixel size
+            # Area = number of pixels * (pixel_to_cm)^2
+            area_cm2 = num_dent_pixels * (pixel_to_cm ** 2)
+            area_method = 'pixel_to_cm'
+    
+    if area_cm2 is None:
+        area_method = None
     
     if not np.any(dent_binary):
         return {
@@ -595,17 +756,55 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
             'missing_info': missing_info
         }
     
-    # Get reference depth (median of non-dent regions)
-    non_dent_binary = ~dent_binary
-    if np.any(non_dent_binary):
-        non_dent_depths = depth_map[non_dent_binary]
-        valid_non_dent = non_dent_depths[np.isfinite(non_dent_depths) & (non_dent_depths > 0)]
-        if len(valid_non_dent) > 0:
-            reference_depth = np.median(valid_non_dent)
+    # Get reference depth: median of normal panel surface (panel regions excluding dent regions)
+    # This represents the expected depth of the panel surface
+    if panel_mask is not None:
+        # Ensure panel_mask matches depth_map dimensions
+        if panel_mask.shape != depth_map.shape:
+            h, w = depth_map.shape
+            panel_mask_resized = cv2.resize(panel_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        else:
+            panel_mask_resized = panel_mask
+        
+        # Panel regions: where panel_mask > 0.5
+        panel_binary = (panel_mask_resized > 0.5)
+        
+        # Normal panel surface: panel regions excluding dent regions
+        normal_panel_binary = panel_binary & ~dent_binary
+        
+        if np.any(normal_panel_binary):
+            normal_panel_depths = depth_map[normal_panel_binary]
+            valid_normal_panel = normal_panel_depths[np.isfinite(normal_panel_depths) & (normal_panel_depths > 0)]
+            if len(valid_normal_panel) > 0:
+                reference_depth = np.median(valid_normal_panel)
+            else:
+                # Fallback: use all panel regions (including dents) if no valid normal panel
+                panel_depths = depth_map[panel_binary]
+                valid_panel = panel_depths[np.isfinite(panel_depths) & (panel_depths > 0)]
+                if len(valid_panel) > 0:
+                    reference_depth = np.median(valid_panel)
+                else:
+                    reference_depth = np.median(valid_depths)
+        else:
+            # Fallback: use all panel regions if no normal panel surface found
+            panel_depths = depth_map[panel_binary]
+            valid_panel = panel_depths[np.isfinite(panel_depths) & (panel_depths > 0)]
+            if len(valid_panel) > 0:
+                reference_depth = np.median(valid_panel)
+            else:
+                reference_depth = np.median(valid_depths)
+    else:
+        # Fallback: use median of non-dent regions if panel_mask not provided
+        non_dent_binary = ~dent_binary
+        if np.any(non_dent_binary):
+            non_dent_depths = depth_map[non_dent_binary]
+            valid_non_dent = non_dent_depths[np.isfinite(non_dent_depths) & (non_dent_depths > 0)]
+            if len(valid_non_dent) > 0:
+                reference_depth = np.median(valid_non_dent)
+            else:
+                reference_depth = np.median(valid_depths)
         else:
             reference_depth = np.median(valid_depths)
-    else:
-        reference_depth = np.median(valid_depths)
     
     # Calculate depth differences (dents are typically depressions, so depth < reference)
     depth_differences = reference_depth - valid_depths
@@ -635,6 +834,7 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
         'num_defects': num_defects,
         'avg_depth_mm': avg_depth_mm,
         'pixel_count': num_dent_pixels,
-        'missing_info': missing_info
+        'missing_info': missing_info,
+        'area_method': area_method
     }
 
