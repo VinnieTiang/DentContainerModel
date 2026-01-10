@@ -1,0 +1,34 @@
+{
+  "fx": 341.3333333333333,
+  "fy": 341.3333333333333,
+  "cx": 256.0,
+  "cy": 256.0,
+  "baseline_cm": 0.0,
+  "resolution": {
+    "width": 512,
+    "height": 512
+  },
+  "fov_degrees": {
+    "horizontal": 75.0,
+    "vertical": 75.0
+  },
+  "intrinsics_matrix": [
+    [
+      341.3333333333333,
+      0.0,
+      256.0
+    ],
+    [
+      0.0,
+      341.3333333333333,
+      256.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "camera_type": "synthetic_perspective",
+  "description": "Default synthetic camera intrinsics for DentContainer2 rendering system. Square images with 75° FOV. Perfect depth from 3D mesh geometry (monocular, no stereo baseline)."
+}
