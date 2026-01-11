@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import cv2
 import numpy as np
+from scipy.ndimage import median_filter
 from typing import Optional, Tuple
 import json
 from pathlib import Path
@@ -567,7 +568,8 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
     
     Args:
         depth_map: Original depth map (H, W) as numpy array in meters
-        dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+        dent_mask: Binary mask (H, W) as numpy array (NPY format from model output)
+                   Can be [0, 1], [0, 255], or boolean. Will be normalized to binary.
         pixel_to_cm: Conversion factor from pixels to cm (fallback if intrinsics not provided).
                      If camera intrinsics are provided, this is ignored in favor of intrinsics-based calculation.
         depth_units: Units of depth_map values. Options: 'meters', 'mm', 'cm', 'inches'
@@ -614,20 +616,23 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
         fov_dict = intrinsics['fov_degrees']
         camera_fov = fov_dict.get('vertical') or fov_dict.get('horizontal')
     
-    # CRITICAL: Detect and convert millimeter values to meters if needed
-    # If max depth > 100, likely still in millimeters (should be < 10m for containers)
+    # CRITICAL: Only auto-detect and convert if depth_units is not explicitly set to 'meters'
+    # If depth_units='meters' is explicitly passed, trust it (e.g., after clean_depth_map_uint16)
     depth_map_converted = depth_map.copy()
-    if np.nanmax(np.abs(depth_map)) > 100:
-        # Likely still in millimeters - convert to meters
-        depth_map_converted = depth_map_converted / 1000.0
-        # Filter error codes and far background
-        depth_map_converted[depth_map_converted > 3.0] = 0.0
-        depth_map_converted[depth_map_converted < 0] = 0.0
-        missing_info.append("Depth map appeared to be in millimeters - converted to meters for calculation")
-    elif np.nanmax(np.abs(depth_map)) > 10.0:
-        # Values > 10m are likely noise/background for container inspection
-        depth_map_converted[depth_map_converted > 10.0] = 0.0
-        missing_info.append("Filtered depth values > 10m (likely background noise)")
+    
+    if depth_units != 'meters':
+        # Auto-detect: If max depth > 100, likely still in millimeters (should be < 10m for containers)
+        if np.nanmax(np.abs(depth_map)) > 100:
+            # Likely still in millimeters - convert to meters
+            depth_map_converted = depth_map_converted / 1000.0
+            # Filter error codes and far background
+            depth_map_converted[depth_map_converted > 3.0] = 0.0
+            depth_map_converted[depth_map_converted < 0] = 0.0
+            missing_info.append("Depth map appeared to be in millimeters - converted to meters for calculation")
+        elif np.nanmax(np.abs(depth_map)) > 10.0:
+            # Values > 10m are likely noise/background for container inspection
+            depth_map_converted[depth_map_converted > 10.0] = 0.0
+            missing_info.append("Filtered depth values > 10m (likely background noise)")
     
     # Handle negative values (convert to positive)
     if np.any(depth_map_converted < 0):
@@ -648,13 +653,29 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
     else:
         area_valid = True
     
+    # --- MASK HANDLING (NPY-only, simplified) ---
+    # Mask is always NPY format from model output
+    # Handle dimensions: Ensure it's 2D (H, W)
+    # Common model outputs: (1, H, W) or (H, W, 1) -> Squeeze to (H, W)
+    if dent_mask.ndim == 3:
+        dent_mask = dent_mask.squeeze()
+    
     # Ensure masks match dimensions
     if depth_map.shape != dent_mask.shape:
         h, w = depth_map.shape
+        # Resize mask to match depth map (Nearest Neighbor to keep it binary)
+        # Note: cv2.resize expects (Width, Height) which is (shape[1], shape[0])
         dent_mask = cv2.resize(dent_mask, (w, h), interpolation=cv2.INTER_NEAREST)
     
-    # Create binary mask (True for dent regions)
-    dent_binary = (dent_mask > 127).astype(bool)
+    # --- Normalize Mask to Binary (0 and 1) ---
+    # Handles inputs like [0, 1] or [0, 255] or [False, True]
+    mask_max = np.nanmax(dent_mask)
+    if mask_max > 1:
+        # If values are 0-255, threshold at 127
+        dent_binary = (dent_mask > 127).astype(bool)
+    else:
+        # If values are already 0-1 or boolean, threshold at 0.5
+        dent_binary = (dent_mask > 0.5).astype(bool)
     
     # Count number of separate dent regions (connected components)
     mask_uint8 = (dent_binary * 255).astype(np.uint8)
@@ -756,76 +777,134 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
             'missing_info': missing_info
         }
     
-    # Get reference depth: median of normal panel surface (panel regions excluding dent regions)
-    # This represents the expected depth of the panel surface
-    if panel_mask is not None:
-        # Ensure panel_mask matches depth_map dimensions
-        if panel_mask.shape != depth_map.shape:
-            h, w = depth_map.shape
-            panel_mask_resized = cv2.resize(panel_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-        else:
-            panel_mask_resized = panel_mask
-        
-        # Panel regions: where panel_mask > 0.5
-        panel_binary = (panel_mask_resized > 0.5)
-        
-        # Normal panel surface: panel regions excluding dent regions
-        normal_panel_binary = panel_binary & ~dent_binary
-        
-        if np.any(normal_panel_binary):
-            normal_panel_depths = depth_map[normal_panel_binary]
-            valid_normal_panel = normal_panel_depths[np.isfinite(normal_panel_depths) & (normal_panel_depths > 0)]
-            if len(valid_normal_panel) > 0:
-                reference_depth = np.median(valid_normal_panel)
-            else:
-                # Fallback: use all panel regions (including dents) if no valid normal panel
-                panel_depths = depth_map[panel_binary]
-                valid_panel = panel_depths[np.isfinite(panel_depths) & (panel_depths > 0)]
-                if len(valid_panel) > 0:
-                    reference_depth = np.median(valid_panel)
-                else:
-                    reference_depth = np.median(valid_depths)
-        else:
-            # Fallback: use all panel regions if no normal panel surface found
-            panel_depths = depth_map[panel_binary]
-            valid_panel = panel_depths[np.isfinite(panel_depths) & (panel_depths > 0)]
-            if len(valid_panel) > 0:
-                reference_depth = np.median(valid_panel)
-            else:
-                reference_depth = np.median(valid_depths)
-    else:
-        # Fallback: use median of non-dent regions if panel_mask not provided
-        non_dent_binary = ~dent_binary
-        if np.any(non_dent_binary):
-            non_dent_depths = depth_map[non_dent_binary]
-            valid_non_dent = non_dent_depths[np.isfinite(non_dent_depths) & (non_dent_depths > 0)]
-            if len(valid_non_dent) > 0:
-                reference_depth = np.median(valid_non_dent)
-            else:
-                reference_depth = np.median(valid_depths)
-        else:
-            reference_depth = np.median(valid_depths)
+    # --- NEW SIMPLIFIED DEPTH CALCULATION ---
+    # Based on: measure_dent_depth_from_files approach
+    # Wall Mask: Pixels that are NOT dent AND have valid depth (>0)
+    # We explicitly ignore 0.0 because that is the background/empty space
+    wall_mask = (dent_binary == False) & (depth_map > 0) & np.isfinite(depth_map)
     
-    # Calculate depth differences (dents are typically depressions, so depth < reference)
-    depth_differences = reference_depth - valid_depths
-    depth_differences = np.maximum(depth_differences, 0)  # Only positive differences
+    # Get Wall Reference Depth (Median)
+    wall_pixels = depth_map[wall_mask]
+    if len(wall_pixels) == 0:
+        # Fallback: use all non-dent pixels if no wall pixels found
+        non_dent_mask = (dent_binary == False) & np.isfinite(depth_map)
+        wall_pixels = depth_map[non_dent_mask]
+        if len(wall_pixels) == 0:
+            # Last resort: use all valid depths
+            wall_pixels = valid_depths
     
-    # Convert depth differences to mm based on depth_units
-    depth_conversion_factors = {
-        'meters': 1000.0,  # meters to mm
-        'mm': 1.0,         # already in mm
-        'cm': 10.0,        # cm to mm
-        'inches': 25.4     # inches to mm
+    # Initialize variables
+    wall_ref_depth = 0.0
+    max_depth_mm = 0.0
+    avg_depth_mm = 0.0
+    dent_depth_median = 0.0
+    dent_depth_max = 0.0
+    dent_depth_min = 0.0
+    raw_depth_diff = 0.0
+    depth_median = 0.0
+    depth_raw_max = 0.0
+    depth_robust_max = 0.0
+    max_depth_value = 0.0
+    is_meters = False
+    depth_units_detected = 'unknown'
+    
+    if len(wall_pixels) > 0:
+        # Get Wall Reference (Median is correct here for a flat wall)
+        wall_ref_depth = np.median(wall_pixels)
+        
+        # Get Dent Pixels (raw, before filtering)
+        dent_pixels_raw = depth_map[dent_binary]
+        if len(dent_pixels_raw) > 0:
+            # --- ROBUST MEASUREMENT: Blur then Max ---
+            # Strategy: Median Filter -> Max
+            # This kills noise spikes but preserves the real dent shape
+            
+            # Extract Dent Region of Interest (ROI)
+            # Create a copy filled with wall_ref so edges don't distort the blur
+            dent_roi = np.full_like(depth_map, wall_ref_depth)
+            dent_roi[dent_binary] = depth_map[dent_binary]
+            
+            # Apply Median Filter (The Magic Step)
+            # size=5 means it looks at a 5x5 area
+            # This kills noise spikes but keeps the dent shape
+            clean_dent_roi = median_filter(dent_roi, size=5)
+            
+            # Get cleaned dent pixels
+            dent_pixels_cleaned = clean_dent_roi[dent_binary]
+            
+            # Calculate Depths relative to wall (from cleaned data)
+            dent_depths_relative_cleaned = np.abs(dent_pixels_cleaned - wall_ref_depth)
+            
+            # Also calculate from raw data for comparison
+            dent_depths_relative_raw = np.abs(dent_pixels_raw - wall_ref_depth)
+            
+            # --- METRIC SELECTION ---
+            # A. Median (Good for volume estimation, bad for safety limits)
+            depth_median = np.median(dent_depths_relative_raw)
+            
+            # B. Raw Max (Dangerous - sensitive to noise)
+            depth_raw_max = np.max(dent_depths_relative_raw)
+            
+            # C. Robust Max (Blur -> Max) - THE GOLD STANDARD
+            # "Median filter removes noise spikes, then max captures true depth"
+            depth_robust_max = np.max(dent_depths_relative_cleaned)
+            
+            # Store individual dent depths for diagnostics
+            dent_depth_median = np.median(dent_pixels_raw)
+            dent_depth_max = np.max(dent_pixels_raw)
+            dent_depth_min = np.min(dent_pixels_raw)
+        else:
+            # No dent pixels
+            depth_median = 0.0
+            depth_raw_max = 0.0
+            depth_robust_max = 0.0
+            dent_depth_median = wall_ref_depth
+            dent_depth_max = wall_ref_depth
+            dent_depth_min = wall_ref_depth
+        
+        # Use robust max (Blur -> Max) as the primary metric
+        raw_depth_diff = depth_robust_max
+        
+        # --- Unit Handling (Auto-detect) ---
+        # Check if the map is likely in Meters (Max value small, e.g. < 10.0)
+        # If so, multiply by 1000 to get Millimeters.
+        max_depth_value = np.nanmax(depth_map)
+        is_meters = max_depth_value < 10.0
+        
+        if is_meters:
+            # Depth map is in meters, convert to mm
+            max_depth_mm = raw_depth_diff * 1000.0
+            # For average depth, use median relative depth
+            avg_depth_mm = depth_median * 1000.0
+            depth_units_detected = 'meters'
+        else:
+            # Depth map is already in mm (or other units)
+            max_depth_mm = raw_depth_diff
+            avg_depth_mm = depth_median
+            depth_units_detected = 'mm'
+    
+    # Add diagnostic information about depth calculation
+    conversion_factor = 1000.0 if is_meters else 1.0
+    depth_stats = {
+        'reference_depth': float(wall_ref_depth),
+        'reference_depth_mm': float(wall_ref_depth * conversion_factor),
+        'dent_depth_median': float(dent_depth_median),
+        'dent_depth_median_mm': float(dent_depth_median * conversion_factor),
+        'dent_depth_max': float(dent_depth_max),
+        'dent_depth_max_mm': float(dent_depth_max * conversion_factor),
+        'dent_depth_min': float(dent_depth_min),
+        'dent_depth_min_mm': float(dent_depth_min * conversion_factor),
+        'depth_units_detected': depth_units_detected,
+        'max_depth_value': float(max_depth_value),
+        'raw_depth_diff': float(raw_depth_diff),
+        'depth_median': float(depth_median),
+        'depth_median_mm': float(depth_median * conversion_factor),
+        'depth_raw_max': float(depth_raw_max),
+        'depth_raw_max_mm': float(depth_raw_max * conversion_factor),
+        'depth_robust_max': float(depth_robust_max),
+        'depth_robust_max_mm': float(depth_robust_max * conversion_factor),
+        'method_used': 'median_filter_then_max'
     }
-    
-    if depth_units not in depth_conversion_factors:
-        missing_info.append(f"Unknown depth_units '{depth_units}'. Assuming meters.")
-        conversion_factor = 1000.0
-    else:
-        conversion_factor = depth_conversion_factors[depth_units]
-    
-    max_depth_mm = np.max(depth_differences) * conversion_factor if depth_differences.size > 0 else 0.0
-    avg_depth_mm = np.mean(depth_differences) * conversion_factor if depth_differences.size > 0 else 0.0
     
     return {
         'area_cm2': area_cm2,
@@ -835,6 +914,7 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
         'avg_depth_mm': avg_depth_mm,
         'pixel_count': num_dent_pixels,
         'missing_info': missing_info,
-        'area_method': area_method
+        'area_method': area_method,
+        'depth_stats': depth_stats
     }
 

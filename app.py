@@ -7,14 +7,16 @@ import torch
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 from pathlib import Path
 import os
 import io
 from PIL import Image
 from datetime import datetime
 import json
+import tempfile
 from model_architecture import AttentionUNet, predict_mask, preprocess_depth, create_dent_overlay, calculate_dent_metrics
-from panel_extractor import RANSACPanelExtractor, DEFAULT_CLOSING_KERNEL_SIZE, DEFAULT_CAMERA_FOV, DEFAULT_DOWNSAMPLE_FACTOR
+from panel_extractor import RANSACPanelExtractor, DEFAULT_CLOSING_KERNEL_SIZE, DEFAULT_CAMERA_FOV, DEFAULT_DOWNSAMPLE_FACTOR, clean_depth_map_uint16
 
 # Page configuration
 st.set_page_config(
@@ -299,60 +301,8 @@ with st.sidebar:
         help="Threshold for converting probability mask to binary mask"
     )
     
-    # Pixel to cm conversion (for area calculation)
-    st.markdown("---")
-    st.subheader("📐 Area Calibration (REQUIRED for area computation)")
-    
-    use_calibration = st.checkbox(
-        "Enable area computation",
-        value=True,
-        help="Uncheck to disable area computation if calibration is not available"
-    )
-    
-    if use_calibration:
-        pixel_to_cm = st.slider(
-            "Pixel to CM Conversion Factor",
-            min_value=0.001,
-            max_value=10.0,
-            value=0.20,
-            step=0.001,
-            format="%.4f",
-            help="REQUIRED: Physical size per pixel in cm. "
-                 "Default (0.20 cm/pixel) assumes: ~2.4m container width, ~2m distance, 1280px image width. "
-                 "To calibrate: (1) Use camera parameters: focal_length/sensor_width * distance/image_width, "
-                 "(2) Measure a known object in the image, or (3) Place a ruler and measure pixels per cm."
-        )
-        
-        with st.expander("ℹ️ How to calibrate pixel-to-cm conversion"):
-            st.markdown("""
-            **Default Value (0.20 cm/pixel):**
-            - Assumes: Standard 2.4m container width, ~2m inspection distance, 1280px image width
-            - Typical for: Intel RealSense, Kinect, or similar depth cameras
-            - **You should calibrate this for your specific setup!**
-            
-            **Method 1: Camera Calibration**
-            - Focal length (mm)
-            - Sensor width (mm) 
-            - Distance to object (mm)
-            - Image width (pixels)
-            - Formula: `pixel_to_cm = (focal_length / sensor_width) * (distance / image_width) * 10`
-            
-            **Method 2: Reference Object (Recommended)**
-            - Place a known-size object (e.g., 10cm ruler) in the image
-            - Measure its width in pixels
-            - Formula: `pixel_to_cm = object_size_cm / object_width_pixels`
-            - Example: If a 10cm ruler spans 50 pixels → 10cm / 50px = 0.20 cm/pixel
-            
-            **Method 3: Container-Based Calibration**
-            - If you know the container width (typically 2.4m = 240cm)
-            - Measure container width in pixels in your image
-            - Formula: `pixel_to_cm = 240cm / container_width_pixels`
-            
-            **⚠️ WARNING:** Without proper calibration, area measurements are NOT physically meaningful!
-            """)
-    else:
-        pixel_to_cm = None
-        st.warning("⚠️ Area computation disabled. Enable calibration above to compute real-world area.")
+    # Area calculation now uses camera intrinsics automatically - no manual calibration needed
+    pixel_to_cm = None  # Not needed when using intrinsics
     
     # Pass/Fail threshold settings
     st.markdown("---")
@@ -374,6 +324,32 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # Camera Intrinsics Settings
+    st.subheader("📷 Camera Intrinsics (Optional)")
+    intrinsics_file = st.file_uploader(
+        "Upload Camera Intrinsics JSON File",
+        type=['json'],
+        help="Upload a camera intrinsics JSON file with fx, fy, cx, cy values. "
+             "If not provided, will use camera_intrinsics_default.json automatically."
+    )
+    
+    intrinsics_json_path = None
+    if intrinsics_file is not None:
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json', mode='wb') as tmp_file:
+            tmp_file.write(intrinsics_file.getvalue())
+            intrinsics_json_path = tmp_file.name
+            st.success(f"✅ Loaded intrinsics file: {intrinsics_file.name}")
+        
+        # Store in session state for cleanup later
+        if 'temp_intrinsics_files' not in st.session_state:
+            st.session_state.temp_intrinsics_files = []
+        st.session_state.temp_intrinsics_files.append(intrinsics_json_path)
+    else:
+        st.info("ℹ️ Using default camera intrinsics from camera_intrinsics_default.json")
+    
+    st.markdown("---")
+    
     # RANSAC Panel Extraction Settings
     st.subheader("🔄 RANSAC Panel Extraction (Optional)")
     use_ransac = st.checkbox(
@@ -390,8 +366,30 @@ with st.sidebar:
             max_value=120.0,
             value=DEFAULT_CAMERA_FOV,
             step=5.0,
-            help="Camera field of view for point cloud conversion"
+            help=f"Camera field of view for point cloud conversion and intrinsics-based area calculation. "
+                 f"Default: {DEFAULT_CAMERA_FOV}° (typical for Intel RealSense, Kinect). "
+                 f"Adjust to match your camera specifications for accurate measurements."
         )
+        
+        with st.expander("ℹ️ How to find your camera FOV"):
+            st.markdown("""
+            **Common Camera FOV Values:**
+            - Intel RealSense D435/D455: ~87° (horizontal) or ~58° (vertical)
+            - Intel RealSense L515: ~70° (diagonal)
+            - Microsoft Kinect v2: ~70° (horizontal)
+            - Generic depth cameras: 60-90°
+            
+            **How to find your camera FOV:**
+            1. Check camera specifications/datasheet
+            2. Look for "Field of View" or "FOV" in degrees
+            3. Use horizontal FOV if available (more accurate for area calculation)
+            4. If only diagonal FOV is given, use that as approximation
+            
+            **Why it matters:**
+            - Used for converting depth maps to 3D point clouds (RANSAC)
+            - Used for calculating accurate pixel sizes at different depths
+            - Incorrect FOV will affect area measurements
+            """)
         adaptive_threshold = st.checkbox(
             "Adaptive residual threshold",
             value=True,
@@ -504,13 +502,78 @@ with col1:
     if uploaded_depth is not None:
         try:
             # Load depth map
-            depth_map = np.load(uploaded_depth)
+            depth_map_raw = np.load(uploaded_depth)
             
-            # Convert to float32 for better precision (especially important for float16 inputs)
-            original_dtype = depth_map.dtype
-            if depth_map.dtype == np.float16:
-                st.warning("⚠️ Float16 detected. Converting to float32 for better precision. Small depth variations may have been lost.")
-            depth_map = depth_map.astype(np.float32)
+            # Store original dtype for display
+            original_dtype = depth_map_raw.dtype
+            
+            # Check if uint16 format - apply special cleaning pipeline
+            is_uint16 = depth_map_raw.dtype == np.uint16 or depth_map_raw.dtype == np.uint32
+            st.session_state.is_uint16_format = is_uint16  # Store for later use in metrics
+            
+            # Display raw depth map first if uint16 format
+            if is_uint16:
+                st.info("🔧 Uint16/Uint32 format detected. Applying raw data cleaning pipeline (crop, unit conversion, inpainting, wall isolation, Gaussian blur)...")
+                
+                # Calculate crop coordinates (matching clean_depth_map_uint16)
+                H, W = depth_map_raw.shape
+                left_crop = int(0.25 * W)
+                right_crop = int(0.85 * W)
+                top_crop = int(0.1 * H)
+                bottom_crop = int(0.9 * H)
+                
+                # Display raw/original depth map first with bounding box showing crop area
+                st.subheader("Input Depth Map")
+                fig_raw, ax_raw = plt.subplots(figsize=(8, 8))
+                im_raw = ax_raw.imshow(depth_map_raw, cmap='viridis')
+                
+                # Draw bounding box to indicate crop area
+                crop_width = right_crop - left_crop
+                crop_height = bottom_crop - top_crop
+                rect = Rectangle(
+                    (left_crop, top_crop), 
+                    crop_width, 
+                    crop_height,
+                    linewidth=3, 
+                    edgecolor='red', 
+                    facecolor='none',
+                    linestyle='--',
+                    label='Crop Area'
+                )
+                ax_raw.add_patch(rect)
+                ax_raw.set_title("Raw Depth Map (Original) - Red box indicates crop area")
+                ax_raw.axis('off')
+                ax_raw.legend(loc='upper right', framealpha=0.8)
+                plt.colorbar(im_raw, ax=ax_raw, fraction=0.046)
+                st.pyplot(fig_raw)
+                
+                # Apply cleaning pipeline
+                with st.spinner("Cleaning raw depth data..."):
+                    depth_map = clean_depth_map_uint16(depth_map_raw, apply_scale_factor=True)
+                st.success("✅ Raw data cleaning completed.")
+                
+                # Display processed/cropped depth map
+                st.subheader("Preprocessed Depth Map")
+                fig_processed, ax_processed = plt.subplots(figsize=(8, 8))
+                im_processed = ax_processed.imshow(depth_map, cmap='viridis')
+                ax_processed.set_title("Preprocessed Depth Map (Cropped & Cleaned)")
+                ax_processed.axis('off')
+                plt.colorbar(im_processed, ax=ax_processed, fraction=0.046)
+                st.pyplot(fig_processed)
+            else:
+                # Convert to float32 for better precision (especially important for float16 inputs)
+                if depth_map_raw.dtype == np.float16:
+                    st.warning("⚠️ Float16 detected. Converting to float32 for better precision. Small depth variations may have been lost.")
+                depth_map = depth_map_raw.astype(np.float32)
+                
+                # Display depth map (non-uint16 case - show single image)
+                st.subheader("Input Depth Map")
+                fig, ax = plt.subplots(figsize=(8, 8))
+                im = ax.imshow(depth_map, cmap='viridis')
+                ax.set_title("Input Depth Map")
+                ax.axis('off')
+                plt.colorbar(im, ax=ax, fraction=0.046)
+                st.pyplot(fig)
             
             # Check resolution and provide guidance
             h, w = depth_map.shape[:2]
@@ -528,15 +591,6 @@ with col1:
             
             st.success(f"✅ Depth map loaded: {uploaded_depth.name}")
             st.info(f"Shape: {depth_map.shape}, Original Dtype: {original_dtype}, Converted to: {depth_map.dtype}")
-            
-            # Display depth map
-            st.subheader("Input Depth Map")
-            fig, ax = plt.subplots(figsize=(8, 8))
-            im = ax.imshow(depth_map, cmap='viridis')
-            ax.set_title("Input Depth Map")
-            ax.axis('off')
-            plt.colorbar(im, ax=ax, fraction=0.046)
-            st.pyplot(fig)
             
             # Store in session state (as float32)
             st.session_state.depth_map = depth_map
@@ -565,6 +619,7 @@ with col1:
                         st.session_state.ransac_cleaned_depth = cleaned_depth
                         st.session_state.ransac_panel_mask = panel_mask
                         st.session_state.ransac_stats = ransac_stats
+                        st.session_state.ransac_camera_fov = camera_fov  # Store for metrics calculation
                     
                     # Display RANSAC results
                     st.subheader("🔄 RANSAC-Extracted Panel")
@@ -713,11 +768,50 @@ with col2:
                     st.session_state.prob_mask = prob_mask
                     
                     # Calculate dent metrics
-                    metrics = calculate_dent_metrics(
-                        st.session_state.depth_map,
-                        binary_mask,
-                        pixel_to_cm=pixel_to_cm
-                    )
+                    # Use RANSAC-cleaned depth if available (already converted to meters)
+                    # Otherwise use original depth map (may need conversion)
+                    depth_for_metrics = st.session_state.ransac_cleaned_depth if st.session_state.ransac_cleaned_depth is not None else st.session_state.depth_map
+                    
+                    # Determine depth units: if uint16 was processed, it's already in meters
+                    # Otherwise, check if it's likely in meters or mm
+                    depth_units_for_metrics = 'meters'  # Default assumption
+                    is_uint16_format = st.session_state.get('is_uint16_format', False)
+                    if is_uint16_format:
+                        # clean_depth_map_uint16 already converted mm to meters (and applied scale_factor=0.5)
+                        depth_units_for_metrics = 'meters'
+                    else:
+                        # For non-uint16, check depth values to auto-detect
+                        if depth_for_metrics is not None:
+                            valid_depths = depth_for_metrics[np.isfinite(depth_for_metrics) & (depth_for_metrics > 0)]
+                            if len(valid_depths) > 0:
+                                median_depth = np.median(valid_depths)
+                                if median_depth > 10:
+                                    depth_units_for_metrics = 'mm'
+                    
+                    # Pass camera intrinsics (from uploaded file or default)
+                    metrics_kwargs = {
+                        'depth_map': depth_for_metrics,
+                        'dent_mask': binary_mask,
+                        'pixel_to_cm': pixel_to_cm,  # None - using intrinsics instead
+                        'intrinsics_json_path': intrinsics_json_path,  # Use uploaded file or None (defaults to default file)
+                        'depth_units': depth_units_for_metrics  # Explicitly set units based on preprocessing
+                    }
+                    
+                    # Add camera intrinsics if RANSAC was used and camera_fov is available
+                    if use_ransac:
+                        # Get camera_fov from session state or use default
+                        ransac_fov = st.session_state.get('ransac_camera_fov', DEFAULT_CAMERA_FOV)
+                        metrics_kwargs['camera_fov'] = ransac_fov
+                        
+                        # Add panel mask for accurate depth measurement (median of normal panel surface)
+                        if panel_mask_precomputed is not None:
+                            metrics_kwargs['panel_mask'] = panel_mask_precomputed
+                    else:
+                        # If RANSAC not used, try to get panel mask from session state if available
+                        if 'ransac_panel_mask' in st.session_state and st.session_state.ransac_panel_mask is not None:
+                            metrics_kwargs['panel_mask'] = st.session_state.ransac_panel_mask
+                    
+                    metrics = calculate_dent_metrics(**metrics_kwargs)
                     
                     # Determine status (PASS/FAIL)
                     has_dents = metrics['num_defects'] > 0
@@ -747,7 +841,7 @@ with col2:
                         st.error(f"🚨 ALERT: {metrics['num_defects']} dent(s) detected!")
                         if status == "FAIL":
                             area_info = f"Area={metrics['area_cm2']:.2f} cm²" if metrics['area_valid'] and metrics['area_cm2'] is not None else "Area=N/A (not calibrated)"
-                            st.error(f"❌ FAIL: Dent exceeds quality thresholds! {area_info}, Depth={metrics['max_depth_mm']:.2f} mm")
+                            st.error(f"❌ FAIL: Dent exceeds quality thresholds! {area_info}, Max Depth={metrics['max_depth_mm']:.2f} mm")
                         else:
                             area_info = f"Area={metrics['area_cm2']:.2f} cm²" if metrics['area_valid'] and metrics['area_cm2'] is not None else "Area=N/A (not calibrated)"
                             st.warning(f"⚠️ PASS with defects: {area_info}, Depth={metrics['max_depth_mm']:.2f} mm")
@@ -802,12 +896,30 @@ with col2:
                     
                     # Dent Metrics Display
                     st.subheader("📊 Dent Metrics")
+                    
+                    # Show intrinsics status
+                    area_method = metrics.get('area_method', None)
+                    
+                    if area_method == 'intrinsics':
+                        st.success("✅ Using camera intrinsics for area calculation")
+                        if intrinsics_file is not None:
+                            st.info(f"ℹ️ Using uploaded intrinsics file: {intrinsics_file.name}")
+                        else:
+                            st.info("ℹ️ Using default camera intrinsics from camera_intrinsics_default.json")
+                    elif area_method == 'pixel_to_cm':
+                        st.warning("⚠️ Falling back to pixel_to_cm method (intrinsics not available)")
+                    else:
+                        st.warning("⚠️ Area calculation not available - check camera intrinsics configuration")
+                    
                     col_a, col_b, col_c, col_d = st.columns(4)
                     with col_a:
                         if metrics['area_valid'] and metrics['area_cm2'] is not None:
-                            st.metric("Total Area", f"{metrics['area_cm2']:.2f} cm²")
+                            method_label = " (Intrinsics)" if area_method == 'intrinsics' else " (pixel_to_cm)"
+                            st.metric("Total Area", f"{metrics['area_cm2']:.2f} cm²", help=f"Calculation method: {area_method or 'pixel_to_cm'}")
+                            if area_method:
+                                st.caption(f"Method: {area_method}")
                         else:
-                            st.metric("Total Area", "N/A", help="Area computation requires pixel-to-cm calibration")
+                            st.metric("Total Area", "N/A", help="Area computation requires calibration")
                             st.caption("⚠️ Not calibrated")
                     with col_b:
                         st.metric("Max Depth", f"{metrics['max_depth_mm']:.2f} mm")
@@ -830,8 +942,64 @@ with col2:
                             st.metric("Avg Depth", f"{metrics['avg_depth_mm']:.2f} mm")
                         st.metric("Max Probability", f"{prob_mask.max():.3f}")
                         st.metric("Pixel Count", f"{metrics['pixel_count']:,}")
-                        if not metrics['area_valid']:
-                            st.info("ℹ️ Area computation requires pixel-to-cm calibration. See settings panel.")
+                        
+                        # Depth calculation diagnostics
+                        if 'depth_stats' in metrics:
+                            st.markdown("---")
+                            st.markdown("**🔍 Depth Calculation Diagnostics:**")
+                            depth_stats = metrics['depth_stats']
+                            units_detected = depth_stats.get('depth_units_detected', 'unknown')
+                            method_used = depth_stats.get('method_used', 'unknown')
+                            st.markdown(f"- **Units Auto-Detected:** {units_detected}")
+                            st.markdown(f"- **Method Used:** {method_used.replace('_', ' ').title()}")
+                            if depth_stats.get('max_depth_value') is not None:
+                                st.markdown(f"- **Max Depth Value in Map:** {depth_stats['max_depth_value']:.4f} {units_detected}")
+                            st.markdown(f"- **Wall Reference Depth (median):** {depth_stats.get('reference_depth', 0):.4f} {units_detected} = {depth_stats.get('reference_depth_mm', 0):.2f} mm")
+                            
+                            st.markdown("**📊 Depth Metrics (Relative to Wall):**")
+                            st.markdown(f"- **Median Depth:** {depth_stats.get('depth_median_mm', 0):.2f} mm (good for volume estimation)")
+                            st.markdown(f"- **Raw Max Depth:** {depth_stats.get('depth_raw_max_mm', 0):.2f} mm (sensitive to noise)")
+                            st.markdown(f"- **Robust Max (Blur→Max):** **{depth_stats.get('depth_robust_max_mm', 0):.2f} mm** ⭐ (median filter removes noise, then max captures true depth)")
+                            
+                            st.markdown("**🔍 Dent Pixel Depths (Absolute):**")
+                            st.markdown(f"- **Dent Median Depth:** {depth_stats.get('dent_depth_median', 0):.4f} {units_detected} = {depth_stats.get('dent_depth_median_mm', 0):.2f} mm")
+                            st.markdown(f"- **Dent Max Depth:** {depth_stats.get('dent_depth_max', 0):.4f} {units_detected} = {depth_stats.get('dent_depth_max_mm', 0):.2f} mm")
+                            st.markdown(f"- **Dent Min Depth:** {depth_stats.get('dent_depth_min', 0):.4f} {units_detected} = {depth_stats.get('dent_depth_min_mm', 0):.2f} mm")
+                            
+                            st.markdown(f"**✅ Final Max Depth (for Pass/Fail):** **{metrics['max_depth_mm']:.2f} mm**")
+                            
+                            # Warning if depth seems unusually large
+                            if metrics['max_depth_mm'] > 100:
+                                st.warning(f"⚠️ **Large depth detected ({metrics['max_depth_mm']:.2f} mm).** This may indicate:")
+                                st.markdown("""
+                                - Depth map units mismatch (e.g., map is in mm but code assumed meters, or vice versa)
+                                - Incorrect reference depth calculation
+                                - Background noise included in dent regions
+                                - Please verify your depth map units and check the diagnostics above
+                                """)
+                        
+                        # Show calculation method details
+                        st.markdown("---")
+                        st.markdown("**📐 Area Calculation Method:**")
+                        if area_method == 'intrinsics':
+                            st.success(f"✅ **Using Camera Intrinsics**")
+                            if intrinsics_file is not None:
+                                st.markdown(f"- Intrinsics file: {intrinsics_file.name}")
+                            else:
+                                st.markdown(f"- Intrinsics file: camera_intrinsics_default.json (default)")
+                            st.markdown(f"- Method: Depth-dependent pixel size calculation using fx, fy")
+                            st.markdown(f"- Accuracy: High (accounts for depth variation)")
+                            st.markdown(f"- Formula: `pixel_size = depth / focal_length`, then `area = Σ(pixel_size²)`")
+                        elif metrics['area_valid'] and metrics['area_cm2'] is not None:
+                            st.warning(f"⚠️ **Falling back to pixel_to_cm Method**")
+                            st.markdown(f"- Reason: Camera intrinsics not available")
+                            st.markdown(f"- Method: Constant pixel size assumption")
+                            st.markdown(f"- Accuracy: Medium (doesn't account for depth variation)")
+                            st.markdown(f"- 💡 **Tip**: Upload a camera intrinsics JSON file for more accurate area calculation")
+                        else:
+                            st.warning("⚠️ **Area calculation not available**")
+                            st.markdown("- Reason: Missing camera intrinsics")
+                            st.markdown("- Upload a camera intrinsics JSON file or ensure camera_intrinsics_default.json exists")
                     
                     # Save to history
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
