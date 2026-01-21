@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shipping Container Dent Detection System</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Global Header -->
+    <header class="global-header">
+        <div class="header-content">
+            <h1 class="system-title">📦 Shipping Container Dent Detection System</h1>
+            <button id="history-btn" class="btn btn-history" title="View processing history">
+                📋 History
+            </button>
+        </div>
+    </header>
+
+    <!-- History Modal -->
+    <div class="modal" id="history-modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Processing History</h2>
+                <button class="btn-close-modal" id="close-history-modal">✕</button>
+            </div>
+            <div class="modal-body">
+                <div id="history-content">
+                    <div class="spinner"></div>
+                    <p>Loading history...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Container Creation Page -->
+    <div id="create-container-page" class="page active">
+        <div class="container">
+            <header>
+                <h1>📦 Shipping Container Dent Detection System</h1>
+                <p class="subtitle">Create a new container inspection</p>
+            </header>
+
+            <div class="create-container-form">
+                <div class="form-group">
+                    <label for="container-name">Container Name:</label>
+                    <input type="text" id="container-name" placeholder="Enter container name (e.g., CONTAINER-0001)"
+                        value="">
+                </div>
+
+                <button id="create-container-btn" class="btn btn-primary">
+                    Create Container
+                </button>
+            </div>
+
+            <div class="containers-list">
+                <h2>Existing Containers</h2>
+                <div id="containers-list-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Container Processing Page -->
+    <div id="processing-page" class="page">
+        <div class="processing-page-container">
+            <header>
+                <h1 id="container-title">Processing Container</h1>
+                <button id="back-to-create-btn" class="btn btn-secondary">← Back to Containers</button>
+            </header>
+
+            <div class="processing-layout">
+                <!-- Left Sidebar -->
+                <aside class="settings-sidebar">
+                    <!-- Model Configuration Panel -->
+                    <div class="config-panel">
+                        <h2>🔧 Model Configuration</h2>
+                        <div class="config-content">
+                            <!-- Model File Upload (Drag & Drop) -->
+                            <div class="form-group">
+                                <label>Upload Model File (.pth):</label>
+                                <div class="file-upload-area" id="model-upload-area">
+                                    <input type="file" id="model-file" accept=".pth" hidden>
+                                    <div class="file-upload-placeholder" id="model-placeholder">
+                                        <span class="upload-icon">📦</span>
+                                        <p>Click to upload model file</p>
+                                        <p class="upload-hint">or drag & drop</p>
+                                    </div>
+                                    <div class="file-upload-selected" id="model-selected" style="display: none;">
+                                        <span class="file-icon">✅</span>
+                                        <span class="file-name" id="model-filename"></span>
+                                        <button class="btn-remove-file" id="remove-model">✕</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Model Path Input (for default or manual path) -->
+                            <div class="form-group">
+                                <label for="model-path">Or use model path:</label>
+                                <input type="text" id="model-path" value="best_attention_unet_4.pth"
+                                    placeholder="Path to model file">
+                                <button id="load-model-btn" class="btn btn-primary">Load Model</button>
+                            </div>
+                            <div id="model-status" class="status-message"></div>
+
+                            <!-- Model Information Display (shown after loading) -->
+                            <div id="model-info-section" style="display: none;">
+                                <h3>📊 Model Information</h3>
+                                <div id="model-info-content" class="model-info-box"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Inference Settings Panel -->
+                    <div class="config-panel">
+                        <h2>⚙️ Inference Settings</h2>
+                        <div class="config-content">
+                            <div class="form-group">
+                                <label for="threshold">Confidence Threshold:</label>
+                                <input type="range" id="threshold" min="0" max="1" step="0.05" value="0.5">
+                                <span id="threshold-value">0.5</span>
+                            </div>
+                            <div class="form-group">
+                                <label for="max-area-threshold">Max Area Threshold (cm²):</label>
+                                <input type="number" id="max-area-threshold" value="100" step="1">
+                            </div>
+                            <div class="form-group">
+                                <label for="max-depth-threshold">Max Depth Threshold (mm):</label>
+                                <input type="number" id="max-depth-threshold" value="35" step="0.5">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Camera Intrinsics Panel -->
+                    <div class="config-panel">
+                        <h2>📷 Camera Intrinsics (Optional)</h2>
+                        <div class="config-content">
+                            <div class="form-group">
+                                <label for="intrinsics-file">Upload Camera Intrinsics JSON:</label>
+                                <div class="file-upload-area" id="intrinsics-upload-area">
+                                    <input type="file" id="intrinsics-file" accept=".json" hidden>
+                                    <div class="file-upload-placeholder" id="intrinsics-placeholder">
+                                        <span class="upload-icon">📄</span>
+                                        <p>Click to upload camera intrinsics JSON</p>
+                                        <p class="upload-hint">or drag & drop</p>
+                                    </div>
+                                    <div class="file-upload-selected" id="intrinsics-selected" style="display: none;">
+                                        <span class="file-icon">✅</span>
+                                        <span class="file-name" id="intrinsics-filename"></span>
+                                        <button class="btn-remove-file" id="remove-intrinsics">✕</button>
+                                    </div>
+                                </div>
+                                <p class="form-hint">If not provided, will use camera_intrinsics_default.json
+                                    automatically</p>
+                            </div>
+                        </div>
+                    </div>
+
+                </aside>
+
+                <!-- Main Content Area -->
+                <main class="processing-main-content">
+
+                    <!-- Panels Section -->
+                    <div class="panels-section">
+                        <div class="panels-main-container">
+                            <div class="panels-list">
+                                <div
+                                    style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                                    <h2 style="margin: 0;">Container Panels</h2>
+                                    <div style="display: flex; gap: 0.5rem;">
+                                        <button id="unified-upload-btn" class="btn btn-primary">
+                                            📁 Unified Upload Folder
+                                        </button>
+                                        <button id="process-all-btn" class="btn btn-primary"
+                                            style="background-color: #2e7d32;">
+                                            Process All
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="panels-grid">
+                                    <!-- Back Panel -->
+                                    <div class="panel-card" data-panel="back">
+                                        <div class="panel-header">
+                                            <h3>Back Panel</h3>
+                                            <div class="panel-header-buttons">
+                                                <button class="btn btn-refresh" data-panel="back"
+                                                    title="Refresh files">🔄</button>
+                                                <button class="btn btn-upload" data-panel="back">📤 Upload
+                                                    Files</button>
+                                            </div>
+                                        </div>
+                                        <div class="panel-content">
+                                            <h4 class="uploaded-files-heading">Uploaded Files</h4>
+                                            <div class="uploaded-files" id="back-files"></div>
+                                            <button class="btn btn-process" data-panel="back" disabled>Process</button>
+                                            <div class="panel-results-list" id="back-results"></div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Left Panel -->
+                                    <div class="panel-card" data-panel="left">
+                                        <div class="panel-header">
+                                            <h3>Left Panel</h3>
+                                            <div class="panel-header-buttons">
+                                                <button class="btn btn-refresh" data-panel="left"
+                                                    title="Refresh files">🔄</button>
+                                                <button class="btn btn-upload" data-panel="left">📤 Upload
+                                                    Files</button>
+                                            </div>
+                                        </div>
+                                        <div class="panel-content">
+                                            <h4 class="uploaded-files-heading">Uploaded Files</h4>
+                                            <div class="uploaded-files" id="left-files"></div>
+                                            <button class="btn btn-process" data-panel="left" disabled>Process</button>
+                                            <div class="panel-results-list" id="left-results"></div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Right Panel -->
+                                    <div class="panel-card" data-panel="right">
+                                        <div class="panel-header">
+                                            <h3>Right Panel</h3>
+                                            <div class="panel-header-buttons">
+                                                <button class="btn btn-refresh" data-panel="right"
+                                                    title="Refresh files">🔄</button>
+                                                <button class="btn btn-upload" data-panel="right">📤 Upload
+                                                    Files</button>
+                                            </div>
+                                        </div>
+                                        <div class="panel-content">
+                                            <h4 class="uploaded-files-heading">Uploaded Files</h4>
+                                            <div class="uploaded-files" id="right-files"></div>
+                                            <button class="btn btn-process" data-panel="right" disabled>Process</button>
+                                            <div class="panel-results-list" id="right-results"></div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Roof Panel -->
+                                    <div class="panel-card" data-panel="door">
+                                        <div class="panel-header">
+                                            <h3>Roof Panel</h3>
+                                            <div class="panel-header-buttons">
+                                                <button class="btn btn-refresh" data-panel="door"
+                                                    title="Refresh files">🔄</button>
+                                                <button class="btn btn-upload" data-panel="door">📤 Upload
+                                                    Files</button>
+                                            </div>
+                                        </div>
+                                        <div class="panel-content">
+                                            <h4 class="uploaded-files-heading">Uploaded Files</h4>
+                                            <div class="uploaded-files" id="door-files"></div>
+                                            <button class="btn btn-process" data-panel="door" disabled>Process</button>
+                                            <div class="panel-results-list" id="door-results"></div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Door Panel -->
+                                    <div class="panel-card" data-panel="front">
+                                        <div class="panel-header">
+                                            <h3>Door Panel</h3>
+                                            <div class="panel-header-buttons">
+                                                <button class="btn btn-refresh" data-panel="front"
+                                                    title="Refresh files">🔄</button>
+                                                <button class="btn btn-upload" data-panel="front">📤 Upload
+                                                    Files</button>
+                                            </div>
+                                        </div>
+                                        <div class="panel-content">
+                                            <h4 class="uploaded-files-heading">Uploaded Files</h4>
+                                            <div class="uploaded-files" id="front-files"></div>
+                                            <button class="btn btn-process" data-panel="front" disabled>Process</button>
+                                            <div class="panel-results-list" id="front-results"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Results Viewer Panel (Right Side) -->
+                            <div class="results-viewer" id="results-viewer">
+                                <div class="viewer-header">
+                                    <h3>Results Viewer</h3>
+                                    <button class="btn btn-close-viewer" id="close-viewer">✕</button>
+                                </div>
+                                <div class="viewer-content" id="viewer-content">
+                                    <p class="viewer-placeholder">Select a result to view details</p>
+                                </div>
+                            </div>
+                </main>
+            </div>
+
+            <!-- Upload Modal -->
+            <div class="modal" id="upload-modal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2 id="modal-title">Upload Files</h2>
+                        <button class="btn-close-modal" id="close-modal">✕</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="modal-body-grid">
+                            <div class="modal-section-left">
+                                <h3>Upload Files</h3>
+                                <div class="upload-area-modal" data-type="depth">
+                                    <div class="upload-placeholder">
+                                        <span class="upload-icon">📁</span>
+                                        <p>Drag & drop depth map (.npy)</p>
+                                        <p class="upload-hint">or click to browse</p>
+                                    </div>
+                                    <input type="file" accept=".npy" class="file-input-modal" data-type="depth" hidden>
+                                </div>
+                                <div class="upload-area-modal" data-type="rgb">
+                                    <div class="upload-placeholder">
+                                        <span class="upload-icon">🖼️</span>
+                                        <p>Drag & drop RGB image (optional)</p>
+                                        <p class="upload-hint">or click to browse</p>
+                                    </div>
+                                    <input type="file" accept="image/*" class="file-input-modal" data-type="rgb" hidden>
+                                </div>
+
+                                <!-- RANSAC Results (appears under upload files when enabled) -->
+                                <div id="ransac-preview" style="display: none;">
+                                    <h4>Panel Extraction Results</h4>
+                                    <div class="ransac-stats" id="ransac-stats"></div>
+                                    <div class="ransac-image-container">
+                                        <img id="ransac-preview-image" src="" alt="RANSAC Preview"
+                                            style="display: none;">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="modal-section-right">
+                                <h3>Preview</h3>
+                                <div class="preview-toggle-buttons" id="preview-toggle-buttons" style="display: none;">
+                                    <button class="btn btn-preview-toggle active" id="toggle-depth"
+                                        data-preview-type="depth">Depth Map</button>
+                                    <button class="btn btn-preview-toggle" id="toggle-rgb" data-preview-type="rgb">RGB
+                                        Image</button>
+                                </div>
+                                <div class="preview-section" id="preview-section" style="display: none;">
+                                    <div id="modal-preview"></div>
+                                </div>
+                                <div id="preview-placeholder" class="preview-placeholder">
+                                    <p>Upload a depth map to see preview</p>
+                                </div>
+
+                                <!-- Panel Extraction Checkbox (appears under preview) -->
+                                <div class="ransac-checkbox-section" id="ransac-checkbox-section"
+                                    style="display: none;">
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" id="modal-ransac-checkbox">
+                                        <span>Enable Panel Extraction (RANSAC)</span>
+                                    </label>
+                                    <!-- Enforce Rectangular Panel Mask Checkbox (appears when RANSAC is enabled) -->
+                                    <label class="checkbox-label" id="rectangular-mask-checkbox-label"
+                                        style="display: none; margin-top: 0.5rem;">
+                                        <input type="checkbox" id="modal-rectangular-mask-checkbox">
+                                        <span>Enforce Rectangular Panel Mask</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <div class="modal-status" id="modal-status">
+                            <span id="status-message">Please upload a depth map (.npy file) to proceed</span>
+                        </div>
+                        <div class="modal-footer-buttons">
+                            <button class="btn btn-secondary" id="cancel-upload">Cancel</button>
+                            <button class="btn btn-primary" id="confirm-upload" disabled>Upload</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unified Folder Upload Modal -->
+    <div class="modal" id="unified-upload-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Unified Folder Upload</h2>
+                <button class="btn-close-modal" id="close-unified-modal">✕</button>
+            </div>
+            <div class="modal-body">
+                <div style="text-align: center; padding: 2rem;">
+                    <p style="margin-bottom: 1rem; color: #666;"><strong>Upload a folder with the following
+                            structure:</strong></p>
+                    <div
+                        style="text-align: left; background: #f5f5f5; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; display: inline-block;">
+                        <code style="color: #333;">
+                            folder/<br>
+                            &nbsp;&nbsp;├── back/<br>
+                            &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── *.npy<br>
+                            &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;└── *.png<br>
+                            &nbsp;&nbsp;├── door/<br>
+                            &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── *.npy<br>
+                            &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;└── *.png<br>
+                            &nbsp;&nbsp;├── roof/<br>
+                            &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── *.npy<br>
+                            &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;└── *.png<br>
+                            &nbsp;&nbsp;├── left_wall/<br>
+                            &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── *.npy<br>
+                            &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;└── *.png<br>
+                            &nbsp;&nbsp;└── right_wall/<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── *.npy<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── *.png
+                        </code>
+                    </div>
+                    <p style="margin-bottom: 1rem; color: #666; font-size: 0.9rem;">Each subfolder should contain a .npy
+                        (depth map) and .png (RGB image) file</p>
+                    <p style="margin-bottom: 2rem; color: #ff9800; font-size: 0.9rem; font-weight: bold;">⚠️ Important:
+                        Select the <strong>parent folder</strong> that contains the subfolders (back/, door/, etc.), not
+                        the subfolders themselves!</p>
+                    <div class="file-upload-area" id="folder-upload-area"
+                        style="min-height: 200px; display: flex; align-items: center; justify-content: center;">
+                        <input type="file" id="folder-input" webkitdirectory directory multiple hidden>
+                        <div class="file-upload-placeholder" id="folder-placeholder">
+                            <span class="upload-icon" style="font-size: 3rem;">📁</span>
+                            <p style="font-size: 1.1rem; margin-top: 1rem;">Drag & drop a folder here</p>
+                            <p class="upload-hint">or click to browse</p>
+                        </div>
+                    </div>
+                    <div id="folder-upload-progress" style="display: none; margin-top: 2rem;">
+                        <div class="spinner"></div>
+                        <p id="folder-upload-status" style="margin-top: 1rem;">Preparing upload...</p>
+                        <div id="folder-upload-details" style="margin-top: 1rem; font-size: 0.9rem; color: #666;"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-status" id="unified-modal-status">
+                    <span id="unified-status-message">Please select a folder to upload</span>
+                </div>
+                <div class="modal-footer-buttons">
+                    <button class="btn btn-secondary" id="cancel-unified-upload">Cancel</button>
+                    <button class="btn btn-primary" id="confirm-unified-upload" disabled>Upload All</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

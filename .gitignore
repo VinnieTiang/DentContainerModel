@@ -4,6 +4,9 @@ __pycache__/
 *$py.class
 *.so
 .Python
+env/
+venv/
+ENV/
 build/
 develop-eggs/
 dist/
@@ -16,36 +19,15 @@ parts/
 sdist/
 var/
 wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
 
-# Virtual Environments
-venv/
-env/
-ENV/
-env.bak/
-venv.bak/
-.venv/
+# Temporary uploads directory
+temp_uploads/
 
-# Conda
-.conda/
-conda-meta/
-*.conda
-
-# PyTorch
+Model files (optional - uncomment if you don't want to track model files)
 *.pth
-*.pt
-*.ckpt
-# Uncomment if you want to track the best model
-# !best_attention_unet.pth
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb_checkpoints/
 
 # IDE
 .vscode/
@@ -53,69 +35,14 @@ conda-meta/
 *.swp
 *.swo
 *~
+
+# OS
 .DS_Store
-
-# Streamlit
-.streamlit/
-
-# Data files (uncomment if you don't want to track data)
-# *.npy
-# *.npz
-# *.png
-# *.jpg
-# *.jpeg
-
-# Output directories
-predictions/
-batch_preds/
-outputs/
-results/
-logs/
-*.log
-
-# Temporary files
-temp_*
-*.tmp
-*.bak
-*.cache
-
-# OS files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
-Desktop.ini
 
-# Model checkpoints and weights (large files)
-models/
-checkpoints/
-weights/
-
-# Test outputs
-test_outputs/
-test_results/
+# Jupyter Notebook
+.ipynb_checkpoints
 
 # Environment variables
 .env
 .env.local
-
-# Coverage reports
-htmlcov/
-.coverage
-.coverage.*
-coverage.xml
-*.cover
-
-# pytest
-.pytest_cache/
-.tox/
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-GITHUB_PUSH_GUIDE.md

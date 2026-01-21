@@ -186,7 +186,7 @@ if 'ransac_stats' not in st.session_state:
     st.session_state.ransac_stats = None
 
 # Header
-st.markdown('<div class="main-header">📦 Dent Container Detection System</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">📦 Shipping Container Dent Detection System</div>', unsafe_allow_html=True)
 st.markdown("---")
 
 # Sidebar - Model Information and Loading
@@ -517,8 +517,8 @@ with col1:
                 
                 # Calculate crop coordinates (matching clean_depth_map_uint16)
                 H, W = depth_map_raw.shape
-                left_crop = int(0.25 * W)
-                right_crop = int(0.85 * W)
+                left_crop = int(0.20 * W)
+                right_crop = int(0.80 * W)
                 top_crop = int(0.1 * H)
                 bottom_crop = int(0.9 * H)
                 
@@ -610,9 +610,9 @@ with col1:
                             force_rectangular_mask=force_rectangular_mask
                         )
                         # Extract panel and fill background
-                        cleaned_depth, panel_mask, ransac_stats = extractor.extract_panel(
+                        cleaned_depth, panel_mask, ransac_stats, plane_coefficients = extractor.extract_panel(
                             depth_map, 
-                            fill_background=True
+                            fill_background=False
                         )
                         
                         # Store in session state for later use
@@ -620,6 +620,7 @@ with col1:
                         st.session_state.ransac_panel_mask = panel_mask
                         st.session_state.ransac_stats = ransac_stats
                         st.session_state.ransac_camera_fov = camera_fov  # Store for metrics calculation
+                        st.session_state.ransac_plane_coefficients = plane_coefficients  # Store plane coefficients
                     
                     # Display RANSAC results
                     st.subheader("🔄 RANSAC-Extracted Panel")
@@ -702,14 +703,17 @@ with col1:
             # Load RGB image
             rgb_image = Image.open(uploaded_rgb)
             rgb_array = np.array(rgb_image)
-            
+
             # Convert RGBA to RGB if needed
             if rgb_array.shape[2] == 4:
                 rgb_array = rgb_array[:, :, :3]
-            
+
             st.success(f"✅ RGB image loaded: {uploaded_rgb.name}")
             st.info(f"Shape: {rgb_array.shape}")
-            
+
+            st.success(f"✅ RGB image loaded: {uploaded_rgb.name}")
+            st.info(f"Shape: {rgb_array.shape}")
+
             # Display RGB image
             st.subheader("Input RGB Image")
             fig, ax = plt.subplots(figsize=(8, 8))
@@ -717,7 +721,7 @@ with col1:
             ax.set_title("Input RGB Image")
             ax.axis('off')
             st.pyplot(fig)
-            
+
             # Store in session state
             st.session_state.rgb_image = rgb_array
             st.session_state.rgb_filename = uploaded_rgb.name
@@ -806,6 +810,10 @@ with col2:
                         # Add panel mask for accurate depth measurement (median of normal panel surface)
                         if panel_mask_precomputed is not None:
                             metrics_kwargs['panel_mask'] = panel_mask_precomputed
+                        
+                        # Add plane coefficients for plane depth-based median calculation
+                        if 'ransac_plane_coefficients' in st.session_state and st.session_state.ransac_plane_coefficients is not None:
+                            metrics_kwargs['plane_coefficients'] = st.session_state.ransac_plane_coefficients
                     else:
                         # If RANSAC not used, try to get panel mask from session state if available
                         if 'ransac_panel_mask' in st.session_state and st.session_state.ransac_panel_mask is not None:
@@ -1149,7 +1157,7 @@ else:
 st.markdown("---")
 st.markdown("""
 <div class="footer-text">
-    <p>Dent Container Detection System | Attention-UNet Model</p>
+    <p>Shipping Container Dent Detection System | Attention-UNet Model</p>
     <p>Upload a depth map (.npy) and optionally an RGB image to generate segmentation masks and overlays</p>
 </div>
 """, unsafe_allow_html=True)

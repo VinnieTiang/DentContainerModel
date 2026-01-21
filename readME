@@ -1,0 +1,11 @@
+# Activate environment
+conda activate rgbd-model
+
+# streamlit UI
+streamlit run app.py
+
+#Start FE
+python -m http.server 8000
+
+# Start Backend Flask
+python api_server.py        
