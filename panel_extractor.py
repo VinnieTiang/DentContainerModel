@@ -225,14 +225,24 @@ class RANSACPanelExtractor:
         depth[depth > 3.0] = 0
         depth[depth < 0] = 0
         
+        # --- ✅ ADDED: TEMPORARY BLUR FOR SYNTHETIC DATA ---
+        # This restores the "Old Code" behavior: We smooth the data used for 
+        # RANSAC plane fitting, but we do NOT overwrite the original 'depth'.
+        # This makes RANSAC robust on noisy synthetic data without blurring the final output.
+        print(f"   Applying temporary Gaussian Blur for RANSAC plane fitting...")
+        # (15, 15) kernel with sigma=2.0 is a robust smoother similar to the old behavior
+        depth_for_fitting = cv2.GaussianBlur(depth, (15, 15), 2.0)
+        # ----------------------------------------------------
+
         # 2. Downsample for speed
+        # ⚠️ IMPORTANT: We now use 'depth_for_fitting' (smoothed) instead of 'depth' (raw)
         if self.downsample_factor > 1:
-            h, w = depth.shape
+            h, w = depth_for_fitting.shape
             h_ds, w_ds = h // self.downsample_factor, w // self.downsample_factor
-            depth_ds = cv2.resize(depth, (w_ds, h_ds), interpolation=cv2.INTER_AREA)
+            depth_ds = cv2.resize(depth_for_fitting, (w_ds, h_ds), interpolation=cv2.INTER_AREA)
             print(f"   Downsampled from {depth.shape} to {depth_ds.shape} (factor={self.downsample_factor})")
         else:
-            depth_ds = depth
+            depth_ds = depth_for_fitting
             
         # 3. Convert to 3D Points
         points_3d, valid_mask_ds = self._depth_to_points_camera_space(depth_ds)
@@ -283,6 +293,11 @@ class RANSACPanelExtractor:
             mask_closed = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
             panel_mask = (mask_closed / 255.0).astype(np.float32)
 
+        # --- ✅ NEW: FILL HOLES WITH CONVEX HULL ---
+        # This bridges the gap over deep dents, ensuring they are included in the mask
+        panel_mask = self._fill_holes_convex(panel_mask)
+        # -------------------------------------------
+
         if self.force_rectangular_mask:
             panel_mask = self._enforce_rectangular_mask(panel_mask)
 
@@ -319,6 +334,29 @@ class RANSACPanelExtractor:
         
         cv2.fillPoly(rect_mask, [box], 255)
         return (rect_mask / 255.0).astype(np.float32)
+
+    def _fill_holes_convex(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Fills holes and edge indentations using Convex Hull.
+        This ensures deep dents on the edge of the container are included in the mask.
+        """
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return mask
+            
+        # Find the largest contour (the panel)
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Calculate Convex Hull (Rubber band effect)
+        hull = cv2.convexHull(largest_contour)
+        
+        # Draw the filled hull
+        filled_mask = np.zeros_like(mask_uint8)
+        cv2.drawContours(filled_mask, [hull], -1, 255, thickness=cv2.FILLED)
+        
+        return (filled_mask / 255.0).astype(np.float32)
 
     def extract_panel(self, depth: np.ndarray, fill_background: bool = False) -> Tuple[np.ndarray, np.ndarray, dict, Optional[np.ndarray]]:
         print("=" * 60)
