@@ -208,9 +208,16 @@ function setupModal() {
             if (rectangularMaskLabel) {
                 rectangularMaskLabel.style.display = 'block';
             }
-            if (modalFiles.depth && currentContainerId) {
+
+            // --- BUG FIX HERE ---
+            // Old code: if (modalFiles.depth && currentContainerId)
+            // New code: Check for EITHER new file object OR existing filename
+            const hasFile = modalFiles.depth || modalFiles.depthFilename;
+
+            if (hasFile && currentContainerId) {
                 await showRANSACPreview();
             }
+            // --------------------
         } else {
             // Hide rectangular mask checkbox when RANSAC is disabled
             if (rectangularMaskLabel) {
@@ -226,9 +233,14 @@ function setupModal() {
         rectangularMaskCheckbox.addEventListener('change', async (e) => {
             // Only update preview if RANSAC is enabled and we have depth data
             const ransacCheckbox = document.getElementById('modal-ransac-checkbox');
-            if (ransacCheckbox && ransacCheckbox.checked && modalFiles.depth && currentContainerId) {
+
+            // --- BUG FIX HERE AS WELL ---
+            const hasFile = modalFiles.depth || modalFiles.depthFilename;
+
+            if (ransacCheckbox && ransacCheckbox.checked && hasFile && currentContainerId) {
                 await showRANSACPreview();
             }
+            // ----------------------------
         });
     }
 
@@ -239,7 +251,8 @@ function setupModal() {
     toggleDepthBtn.addEventListener('click', async () => {
         toggleDepthBtn.classList.add('active');
         toggleRgbBtn.classList.remove('active');
-        await showDepthPreview();
+        // Pass the current ID if we are looking at an existing file
+        await showDepthPreview(currentModalUploadId);
     });
 
     toggleRgbBtn.addEventListener('click', async () => {
@@ -251,7 +264,6 @@ function setupModal() {
     // Setup modal file inputs
     setupModalFileInputs();
 }
-
 // Setup Modal File Inputs
 function setupModalFileInputs() {
     const uploadAreas = document.querySelectorAll('.upload-area-modal');
@@ -483,6 +495,7 @@ async function showDepthPreview(specificUploadId = null) {
 
                 // CRITICAL: Use the ID of the file we JUST uploaded
                 if (data.upload_id) {
+                    currentModalUploadId = data.upload_id;
                     specificUploadId = data.upload_id;
                 }
             }
@@ -716,7 +729,10 @@ async function showRGBPreview() {
 
 // Show RANSAC Preview
 async function showRANSACPreview() {
-    if (!modalFiles.depth || !currentContainerId || !currentModalPanel) return;
+    // FIX 1: Allow execution if EITHER a new file (depth) OR existing file (depthFilename) exists
+    const hasFile = modalFiles.depth || modalFiles.depthFilename;
+
+    if (!hasFile || !currentContainerId || !currentModalPanel) return;
 
     const ransacPreview = document.getElementById('ransac-preview');
     const ransacStats = document.getElementById('ransac-stats');
@@ -727,16 +743,17 @@ async function showRANSACPreview() {
     ransacImage.style.display = 'none';
 
     try {
-        // Get RANSAC parameters (using defaults and checkbox values)
+        // Get RANSAC parameters
         const rectangularMaskCheckbox = document.getElementById('modal-rectangular-mask-checkbox');
         const params = {
-            adaptive_threshold: false, // Default to fixed threshold (safer for measurement)
+            // FIX 2: Pass the specific upload ID so backend knows which file to process
+            upload_id: currentModalUploadId,
+            adaptive_threshold: false,
             apply_morphological_closing: true,
-            closing_kernel_size: 30, // Match Python default
+            closing_kernel_size: 30,
             force_rectangular_mask: rectangularMaskCheckbox ? rectangularMaskCheckbox.checked : true
         };
 
-        // Call RANSAC preview endpoint
         const response = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/ransac/preview`, {
             method: 'POST',
             headers: {
@@ -748,7 +765,6 @@ async function showRANSACPreview() {
         const data = await response.json();
 
         if (data.success) {
-            // Show stats
             const stats = data.stats || {};
             ransacStats.innerHTML = `
                 <div class="ransac-stat-item">
@@ -761,7 +777,6 @@ async function showRANSACPreview() {
                 </div>
             `;
 
-            // Show preview image
             if (data.preview_image) {
                 ransacImage.src = `data:image/png;base64,${data.preview_image}`;
                 ransacImage.style.display = 'block';
@@ -1210,7 +1225,10 @@ async function loadExistingFilesIntoModal(panelName, uploadId = null) {
                     const found = panelData.uploads.find(u => u.upload_id === uploadId);
                     if (found) {
                         targetData = found;
+                        currentModalUploadId = uploadId;
                         console.log("Loading specific upload:", uploadId);
+                    } else {
+                        currentModalUploadId = targetData.upload_id || null;
                     }
                 }
 
