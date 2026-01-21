@@ -1225,24 +1225,23 @@ async function loadExistingFilesIntoModal(panelName, uploadId = null) {
                     const found = panelData.uploads.find(u => u.upload_id === uploadId);
                     if (found) {
                         targetData = found;
-                        currentModalUploadId = uploadId;
-                        console.log("Loading specific upload:", uploadId);
-                    } else {
-                        currentModalUploadId = targetData.upload_id || null;
+                        currentModalUploadId = uploadId; // Set global ID
                     }
+                } else {
+                    currentModalUploadId = targetData.upload_id || null;
                 }
 
                 // Reset modal files
                 modalFiles.depth = null;
                 modalFiles.rgb = null;
 
-                // Update modal with TARGET data
+                // Update modal with TARGET data (Depth)
                 if (targetData.depth_path || targetData.depth_filename) {
                     const depthArea = document.querySelector('.upload-area-modal[data-type="depth"]');
                     if (depthArea) {
                         depthArea.classList.add('has-file');
                         const fname = targetData.depth_filename || 'depth_map.npy';
-                        modalFiles.depthFilename = fname; // Set this so preview knows file exists
+                        modalFiles.depthFilename = fname;
 
                         depthArea.querySelector('.upload-placeholder').innerHTML = `
                             <span class="upload-icon">✅</span>
@@ -1254,6 +1253,7 @@ async function loadExistingFilesIntoModal(panelName, uploadId = null) {
                     }
                 }
 
+                // Update modal with TARGET data (RGB)
                 if (targetData.rgb_path || targetData.rgb_filename) {
                     const rgbArea = document.querySelector('.upload-area-modal[data-type="rgb"]');
                     if (rgbArea) {
@@ -1269,18 +1269,37 @@ async function loadExistingFilesIntoModal(panelName, uploadId = null) {
                     }
                 }
 
-                // Restore RANSAC preferences
+                // --- RESTORE RANSAC STATE ---
                 const ransacCheckbox = document.getElementById('modal-ransac-checkbox');
+                const rectangularMaskLabel = document.getElementById('rectangular-mask-checkbox-label');
+                const rectangularMaskCheckbox = document.getElementById('modal-rectangular-mask-checkbox');
+
                 if (ransacCheckbox && targetData.use_ransac !== undefined) {
                     ransacCheckbox.checked = targetData.use_ransac;
+
+                    // Restore sub-option visibility
+                    if (rectangularMaskLabel) {
+                        rectangularMaskLabel.style.display = targetData.use_ransac ? 'block' : 'none';
+                    }
                 }
 
-                // Check status and show preview
+                if (rectangularMaskCheckbox && targetData.force_rectangular_mask !== undefined) {
+                    rectangularMaskCheckbox.checked = targetData.force_rectangular_mask;
+                }
+
+                // Check status
                 checkReadyStatus();
 
-                // Load the SPECIFIC preview
+                // --- CRITICAL FIX: TRIGGER PREVIEWS ---
                 setTimeout(async () => {
-                    await showDepthPreview(uploadId);
+                    // 1. Show Depth Preview
+                    await showDepthPreview(currentModalUploadId);
+
+                    // 2. Show RANSAC Preview (IF CHECKED)
+                    if (ransacCheckbox && ransacCheckbox.checked) {
+                        // This line was missing or logic prevented it from running
+                        await showRANSACPreview();
+                    }
                 }, 300);
             }
         }
@@ -3021,3 +3040,21 @@ style.textContent = `
     }
 `;
 document.head.appendChild(style);
+
+// Add to your style block at the bottom of app.js
+const ransacStyle = `
+    #ransac-preview {
+        transition: all 0.3s ease;
+        border-left: 3px solid #4CAF50; /* Green accent line to show it belongs to enabled option */
+    }
+    .ransac-stat-item {
+        background: white;
+        padding: 5px 10px;
+        border-radius: 4px;
+        border: 1px solid #eee;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    .ransac-stat-label { font-weight: bold; color: #555; font-size: 0.8em; }
+    .ransac-stat-value { color: #2196F3; font-weight: bold; }
+`;
+document.querySelector('style').textContent += ransacStyle;

@@ -318,15 +318,7 @@
                                     <input type="file" accept="image/*" class="file-input-modal" data-type="rgb" hidden>
                                 </div>
 
-                                <!-- RANSAC Results (appears under upload files when enabled) -->
-                                <div id="ransac-preview" style="display: none;">
-                                    <h4>Panel Extraction Results</h4>
-                                    <div class="ransac-stats" id="ransac-stats"></div>
-                                    <div class="ransac-image-container">
-                                        <img id="ransac-preview-image" src="" alt="RANSAC Preview"
-                                            style="display: none;">
-                                    </div>
-                                </div>
+
                             </div>
 
                             <div class="modal-section-right">
@@ -345,18 +337,33 @@
                                 </div>
 
                                 <!-- Panel Extraction Checkbox (appears under preview) -->
-                                <div class="ransac-checkbox-section" id="ransac-checkbox-section"
-                                    style="display: none;">
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" id="modal-ransac-checkbox">
-                                        <span>Enable Panel Extraction (RANSAC)</span>
-                                    </label>
-                                    <!-- Enforce Rectangular Panel Mask Checkbox (appears when RANSAC is enabled) -->
-                                    <label class="checkbox-label" id="rectangular-mask-checkbox-label"
-                                        style="display: none; margin-top: 0.5rem;">
-                                        <input type="checkbox" id="modal-rectangular-mask-checkbox">
-                                        <span>Enforce Rectangular Panel Mask</span>
-                                    </label>
+                                <div id="ransac-checkbox-section"
+                                    style="display: none; margin-top: 15px; border-top: 1px solid #eee; padding-top: 15px;">
+
+                                    <div style="display: flex; align-items: center; margin-bottom: 10px;">
+                                        <input type="checkbox" id="modal-ransac-checkbox" style="margin-right: 10px;">
+                                        <label for="modal-ransac-checkbox" style="font-weight: 500;">Enable Panel
+                                            Extraction (RANSAC)</label>
+                                    </div>
+
+                                    <div id="rectangular-mask-checkbox-label"
+                                        style="display: none; margin-left: 25px; margin-bottom: 15px;">
+                                        <div style="display: flex; align-items: center;">
+                                            <input type="checkbox" id="modal-rectangular-mask-checkbox" checked>
+                                            <label for="modal-rectangular-mask-checkbox"
+                                                style="font-size: 0.9em; color: #555;"> Force Rectangular Mask</label>
+                                        </div>
+                                    </div>
+
+                                    <div id="ransac-preview"
+                                        style="display: none; margin-left: 25px; margin-top: 10px; background: #f9f9f9; padding: 10px; border-radius: 8px;">
+                                        <div id="ransac-stats"
+                                            style="margin-bottom: 10px; font-size: 0.9em; display: flex; gap: 15px;">
+                                        </div>
+                                        <img id="ransac-preview-image" src="" alt="RANSAC Preview"
+                                            style="max-width: 100%; border-radius: 4px; border: 1px solid #ddd; display: none;">
+                                    </div>
+
                                 </div>
                             </div>
                         </div>
