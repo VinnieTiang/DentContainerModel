@@ -238,9 +238,27 @@
                                     </div>
 
                                     <!-- Roof Panel -->
-                                    <div class="panel-card" data-panel="door">
+                                    <div class="panel-card" data-panel="roof">
                                         <div class="panel-header">
                                             <h3>Roof Panel</h3>
+                                            <div class="panel-header-buttons">
+                                                <button class="btn btn-refresh" data-panel="roof"
+                                                    title="Refresh files">🔄</button>
+                                                <button class="btn btn-upload" data-panel="roof">📤 Upload
+                                                    Files</button>
+                                            </div>
+                                        </div>
+                                        <div class="panel-content">
+                                            <h4 class="uploaded-files-heading">Uploaded Files</h4>
+                                            <div class="uploaded-files" id="roof-files"></div> <button
+                                                class="btn btn-process" data-panel="roof" disabled>Process</button>
+                                            <div class="panel-results-list" id="roof-results"></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="panel-card" data-panel="door">
+                                        <div class="panel-header">
+                                            <h3>Door Panel</h3>
                                             <div class="panel-header-buttons">
                                                 <button class="btn btn-refresh" data-panel="door"
                                                     title="Refresh files">🔄</button>
@@ -253,25 +271,6 @@
                                             <div class="uploaded-files" id="door-files"></div>
                                             <button class="btn btn-process" data-panel="door" disabled>Process</button>
                                             <div class="panel-results-list" id="door-results"></div>
-                                        </div>
-                                    </div>
-
-                                    <!-- Door Panel -->
-                                    <div class="panel-card" data-panel="front">
-                                        <div class="panel-header">
-                                            <h3>Door Panel</h3>
-                                            <div class="panel-header-buttons">
-                                                <button class="btn btn-refresh" data-panel="front"
-                                                    title="Refresh files">🔄</button>
-                                                <button class="btn btn-upload" data-panel="front">📤 Upload
-                                                    Files</button>
-                                            </div>
-                                        </div>
-                                        <div class="panel-content">
-                                            <h4 class="uploaded-files-heading">Uploaded Files</h4>
-                                            <div class="uploaded-files" id="front-files"></div>
-                                            <button class="btn btn-process" data-panel="front" disabled>Process</button>
-                                            <div class="panel-results-list" id="front-results"></div>
                                         </div>
                                     </div>
                                 </div>

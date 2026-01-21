@@ -163,8 +163,8 @@ def create_container():
                 'back': {'uploads': []},
                 'left': {'uploads': []},
                 'right': {'uploads': []},
-                'door': {'uploads': []},
-                'front': {'uploads': []}
+                'roof': {'uploads': []},
+                'door': {'uploads': []}
             },
             'results': {}
         }
@@ -240,7 +240,7 @@ def upload_panel_files(container_id, panel_name):
     if container_id not in containers:
         return jsonify({'error': 'Container not found'}), 404
     
-    if panel_name not in ['back', 'left', 'right', 'door', 'front']:
+    if panel_name not in ['back', 'left', 'right', 'roof', 'door']:
         return jsonify({'error': 'Invalid panel name'}), 400
     
     try:
@@ -391,7 +391,7 @@ def update_ransac_preference(container_id, panel_name):
     if container_id not in containers:
         return jsonify({'error': 'Container not found'}), 404
     
-    if panel_name not in ['back', 'left', 'right', 'door', 'front']:
+    if panel_name not in ['back', 'left', 'right', 'roof', 'door']:
         return jsonify({'error': 'Invalid panel name'}), 400
     
     panel_data = containers[container_id]['panels'].get(panel_name)
@@ -458,7 +458,7 @@ def process_panel(container_id, panel_name):
     if container_id not in containers:
         return jsonify({'error': 'Container not found'}), 404
     
-    if panel_name not in ['back', 'left', 'right', 'door', 'front']:
+    if panel_name not in ['back', 'left', 'right', 'roof', 'door']:
         return jsonify({'error': 'Invalid panel name'}), 400
     
     if not model_loaded:
@@ -1120,39 +1120,114 @@ def get_depth_preview(container_id, panel_name):
             'traceback': traceback.format_exc()
         }), 500
 
-
 @app.route('/api/history', methods=['GET'])
 def get_history():
     """Get all processed results from all containers with thumbnails"""
     history = []
     import base64
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
     
     for container_id, container_data in containers.items():
         container_name = container_data.get('name', container_id)
-        created_at = container_data.get('created_at', '')
         
         # Get all results for this container
         results = container_data.get('results', {})
-        for panel_name, result_data in results.items():
-            if result_data:
-                # Get thumbnail preview (prefer overlay, then binary mask, then prob mask)
+        
+        for panel_name, panel_results in results.items():
+            if not panel_results:
+                continue
+
+            # Determine if we have a single result (legacy) or a dict of results (stacked)
+            results_list = []
+            
+            # Check if it's the new nested structure (does NOT have 'status' at top level)
+            if isinstance(panel_results, dict) and 'status' not in panel_results:
+                results_list = list(panel_results.values())
+            else:
+                results_list = [panel_results]
+            
+            # Iterate through ALL results for this panel
+            for result_data in results_list:
                 thumbnail = None
+                
+                # 1. PRIORITY: RGB Overlay (if available)
                 if result_data.get('overlay_path') and os.path.exists(result_data['overlay_path']):
                     try:
                         overlay_img = Image.open(result_data['overlay_path'])
-                        # Resize to thumbnail size (200x200)
                         overlay_img.thumbnail((200, 200), Image.Resampling.LANCZOS)
                         buffer = io.BytesIO()
                         overlay_img.save(buffer, format='PNG')
                         buffer.seek(0)
                         thumbnail = base64.b64encode(buffer.getvalue()).decode('utf-8')
                     except Exception as e:
-                        print(f"Error generating overlay thumbnail: {e}")
+                        print(f"Error generating RGB overlay thumbnail: {e}")
                 
+                # 2. PRIORITY: Depth Overlay (Generate dynamically if RGB missing)
+                if not thumbnail and result_data.get('mask_path') and os.path.exists(result_data['mask_path']):
+                    try:
+                        # We need to find the depth file associated with this result
+                        upload_id = result_data.get('upload_id')
+                        depth_path = None
+                        
+                        # Look up depth path in panel uploads
+                        panel_data = container_data['panels'].get(panel_name, {})
+                        if 'uploads' in panel_data:
+                            for upload in panel_data['uploads']:
+                                if upload['upload_id'] == upload_id:
+                                    depth_path = upload['depth_path']
+                                    break
+                        # Fallback to top-level if not found
+                        if not depth_path:
+                            depth_path = panel_data.get('depth_path')
+
+                        if depth_path and os.path.exists(depth_path):
+                            # Load data
+                            depth_map = np.load(depth_path)
+                            binary_mask = np.load(result_data['mask_path'])
+                            
+                            # Create Visualization (Thread Safe)
+                            fig = Figure(figsize=(4, 4), dpi=72) # Small size for thumbnail
+                            canvas = FigureCanvas(fig)
+                            ax = fig.add_subplot(111)
+                            
+                            # Plot Depth
+                            ax.imshow(depth_map, cmap='viridis', interpolation='nearest')
+                            
+                            # Overlay Mask (Red with alpha)
+                            if binary_mask.max() > 0:
+                                # Normalize mask to 0-1
+                                mask_norm = (binary_mask > 0).astype(np.float32)
+                                overlay = np.zeros((*mask_norm.shape, 4))
+                                overlay[:, :, 0] = 1.0  # Red
+                                overlay[:, :, 3] = mask_norm * 0.5  # Alpha
+                                ax.imshow(overlay, interpolation='nearest')
+                            
+                            ax.axis('off')
+                            fig.tight_layout(pad=0)
+                            
+                            # Save to buffer
+                            buffer = io.BytesIO()
+                            fig.savefig(buffer, format='PNG', bbox_inches='tight', pad_inches=0)
+                            buffer.seek(0)
+                            
+                            # Resize to thumbnail standard
+                            img_pil = Image.open(buffer)
+                            img_pil.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                            
+                            final_buffer = io.BytesIO()
+                            img_pil.save(final_buffer, format='PNG')
+                            final_buffer.seek(0)
+                            
+                            thumbnail = base64.b64encode(final_buffer.getvalue()).decode('utf-8')
+                    except Exception as e:
+                        print(f"Error generating depth overlay thumbnail: {e}")
+
+                # 3. PRIORITY: Binary Mask (Fallback)
                 if not thumbnail and result_data.get('mask_path') and os.path.exists(result_data['mask_path']):
                     try:
                         binary_mask = np.load(result_data['mask_path'])
-                        binary_mask_img = Image.fromarray(binary_mask, mode='L')
+                        binary_mask_img = Image.fromarray((binary_mask > 0).astype(np.uint8) * 255, mode='L')
                         binary_mask_img.thumbnail((200, 200), Image.Resampling.LANCZOS)
                         buffer = io.BytesIO()
                         binary_mask_img.save(buffer, format='PNG')
@@ -1165,6 +1240,7 @@ def get_history():
                     'container_id': container_id,
                     'container_name': container_name,
                     'panel_name': panel_name,
+                    'upload_id': result_data.get('upload_id'),
                     'status': result_data.get('status', 'UNKNOWN'),
                     'note': result_data.get('note'),
                     'timestamp': result_data.get('timestamp', ''),
@@ -1183,7 +1259,6 @@ def get_history():
         'history': history,
         'total': len(history)
     })
-
 
 @app.route('/api/containers/<container_id>/panels/<panel_name>/results/preview', methods=['GET'])
 def get_preview(container_id, panel_name):

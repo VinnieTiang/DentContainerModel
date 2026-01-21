@@ -61,8 +61,8 @@ let panelFilePairs = {
     back: [],
     left: [],
     right: [],
-    door: [],
-    front: []
+    roof: [],
+    door: []
 };
 
 // Initialize app
@@ -1375,16 +1375,27 @@ async function openContainer(containerId) {
     }
 }
 
-// Load Panel Data
+// Load Panel Data (Fixed: Clears previous container state)
 async function loadPanelData(container) {
-    const panels = ['back', 'left', 'right', 'door', 'front'];
+    const panels = ['back', 'left', 'right', 'roof', 'door'];
+
+    // 1. STRICT RESET: Wipe all previous data immediately
+    // This ensures no "ghost files" carry over from the previous container
+    panelFilePairs = {
+        back: [],
+        left: [],
+        right: [],
+        roof: [],
+        door: []
+    };
 
     try {
-        // Initialize file pairs from container data
+        // 2. Populate with new data (if any)
         for (const panelName of panels) {
             const panelData = container.panels[panelName];
+
+            // Only map if uploads exist
             if (panelData && panelData.uploads && panelData.uploads.length > 0) {
-                // Initialize with uploads from server
                 panelFilePairs[panelName] = panelData.uploads.map(upload => ({
                     upload_id: upload.upload_id,
                     depth_filename: upload.depth_filename || 'depth_map.npy',
@@ -1393,21 +1404,16 @@ async function loadPanelData(container) {
                     rgb_shape: upload.rgb_shape || null,
                     uploaded_at: upload.uploaded_at || new Date().toISOString()
                 }));
-            } else {
-                // Initialize empty array if no data
-                if (!panelFilePairs[panelName]) {
-                    panelFilePairs[panelName] = [];
-                }
             }
+            // Note: No 'else' needed because we already reset everything to [] at the top
         }
 
-        // Update display for all panels
+        // 3. Update display for all panels
         for (const panelName of panels) {
             await updatePanelDisplay(panelName);
         }
     } catch (error) {
         console.error('Error loading panel data:', error);
-        // Don't throw - allow page to load even if panel data fails
     }
 }
 
@@ -1769,83 +1775,68 @@ async function processPanel(panelName) {
 }
 
 
-// Process All Panels
+// Process All Panels (With Strict Checks)
 async function processAllPanels() {
     console.log('processAllPanels called');
 
+    // --- 1. STRICT CHECKS (Guard Clauses) ---
+    // These must happen BEFORE we disable any buttons!
+
     if (!currentContainerId) {
         showNotification('Please create a container first', 'error');
-        return;
+        return; // Stops execution immediately
     }
 
     if (!modelLoaded) {
         showNotification('Please load the model first', 'error');
-        return;
+        // This ensures we DO NOT proceed to the loop below
+        return; // Stops execution immediately
     }
 
     const processAllBtn = document.getElementById('process-all-btn');
-    if (!processAllBtn) {
-        console.error('Process All button not found');
-        return;
-    }
+    if (!processAllBtn) return;
 
-    // Disable the button and show processing status
+    // --- 2. LOCK UI ---
+    // Only lock buttons if we passed the checks above
     processAllBtn.disabled = true;
-    const originalText = processAllBtn.textContent;
-    processAllBtn.textContent = 'Processing...';
+    processAllBtn.textContent = 'Processing Batch...';
+
+    const allPanels = ['back', 'left', 'right', 'roof', 'door'];
 
     try {
-        // Find all Process buttons that are enabled (panels with files)
-        const processButtons = document.querySelectorAll('.btn-process');
-        const enabledProcessButtons = Array.from(processButtons).filter(btn => !btn.disabled);
+        // --- 3. PROCESS LOOP ---
+        for (const panelName of allPanels) {
 
-        console.log(`Found ${enabledProcessButtons.length} enabled Process buttons`);
+            // Check if this panel has files uploaded
+            // We use the local panelFilePairs to check quickly without asking the server
+            const hasFiles = panelFilePairs[panelName] && panelFilePairs[panelName].length > 0;
 
-        if (enabledProcessButtons.length === 0) {
-            showNotification('No panels with files found. Please upload files first.', 'error');
-            processAllBtn.disabled = false;
-            processAllBtn.textContent = originalText;
-            return;
-        }
+            if (hasFiles) {
+                console.log(`Triggering process for: ${panelName}`);
 
-        // Click each Process button sequentially (simulates clicking all buttons)
-        for (let i = 0; i < enabledProcessButtons.length; i++) {
-            const btn = enabledProcessButtons[i];
-            const panelName = btn.dataset.panel;
+                // Update button text to show progress
+                processAllBtn.textContent = `Processing: ${panelName.toUpperCase()}...`;
 
-            processAllBtn.textContent = `Processing... (${i + 1}/${enabledProcessButtons.length}): ${panelName}`;
+                // Run the individual panel process and WAIT for it
+                await processPanel(panelName);
 
-            console.log(`Clicking Process button for ${panelName} panel`);
-
-            // Click the button to trigger processing
-            btn.click();
-
-            // Wait for the panel to finish processing before moving to next
-            // We'll wait a bit, then check if button is re-enabled (indicating processing is done)
-            let waitCount = 0;
-            while (btn.disabled && waitCount < 120) { // Max 60 seconds per panel
-                await new Promise(resolve => setTimeout(resolve, 500));
-                waitCount++;
-            }
-
-            // Small delay between panels
-            if (i < enabledProcessButtons.length - 1) {
+                // Small safety pause to allow UI to breathe
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
         }
 
-        // Show summary notification
-        showNotification(`Finished processing all ${enabledProcessButtons.length} panel(s)! Check individual panel results below.`, 'success');
+        showNotification('Batch processing complete!', 'success');
 
     } catch (error) {
-        console.error('Error in processAllPanels:', error);
-        showNotification('Failed to process all panels. Make sure the API server is running.', 'error');
+        console.error('Error in batch processing:', error);
+        showNotification('Something went wrong during batch processing.', 'error');
     } finally {
+        // --- 4. UNLOCK UI ---
+        // Always re-enable the button, even if errors occurred
         processAllBtn.disabled = false;
-        processAllBtn.textContent = originalText;
+        processAllBtn.textContent = 'Process All';
     }
 }
-
 // Display Existing Results (for refresh - just show, don't process)
 async function displayExistingResults(panelName, resultData) {
     const resultsDiv = document.getElementById(`${panelName}-results`);
@@ -2640,10 +2631,10 @@ async function handleFolderSelection(files) {
     // Map folder names to panel names
     const folderToPanelMap = {
         'back': 'back',
-        'door': 'front',
-        'roof': 'door',
         'left_wall': 'left',
-        'right_wall': 'right'
+        'right_wall': 'right',
+        'roof': 'roof',
+        'door': 'door'
     };
 
     // Valid folder names (normalized to lowercase)
@@ -2948,6 +2939,7 @@ async function confirmUnifiedUpload() {
 
                     // Add new file pair to the panel's file pairs array
                     const newFilePair = {
+                        upload_id: data.upload_id,
                         depth_filename: data.depth_filename || null,
                         depth_shape: data.depth_shape || [],
                         rgb_filename: data.rgb_filename || null,
