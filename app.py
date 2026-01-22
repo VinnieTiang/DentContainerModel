@@ -517,8 +517,8 @@ with col1:
                 
                 # Calculate crop coordinates (matching clean_depth_map_uint16)
                 H, W = depth_map_raw.shape
-                left_crop = int(0.20 * W)
-                right_crop = int(0.80 * W)
+                left_crop = int(0.10 * W)
+                right_crop = int(0.60 * W)
                 top_crop = int(0.1 * H)
                 bottom_crop = int(0.9 * H)
                 
@@ -758,7 +758,7 @@ with col2:
                             st.warning("⚠️ RANSAC enabled but no pre-computed results found. Please upload depth map again or disable RANSAC.")
                     
                     # Run inference (uses pre-computed RANSAC results if available)
-                    binary_mask, prob_mask = predict_mask(
+                    binary_mask, prob_mask, preprocessed_input = predict_mask(
                         st.session_state.model,
                         st.session_state.depth_map,
                         device=str(st.session_state.device),

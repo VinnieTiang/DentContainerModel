@@ -336,14 +336,14 @@ function openUploadModal(panelName) {
     const confirmBtn = document.getElementById('confirm-upload');
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Upload';
-    document.getElementById('modal-ransac-checkbox').checked = false;
+    document.getElementById('modal-ransac-checkbox').checked = true;
     const rectangularMaskLabel = document.getElementById('rectangular-mask-checkbox-label');
     if (rectangularMaskLabel) {
         rectangularMaskLabel.style.display = 'none';
     }
     const rectangularMaskCheckbox = document.getElementById('modal-rectangular-mask-checkbox');
     if (rectangularMaskCheckbox) {
-        rectangularMaskCheckbox.checked = true; // Reset to default (checked)
+        rectangularMaskCheckbox.checked = false; // Reset to default (unchecked)
     }
 
     // Reset toggle buttons
@@ -412,6 +412,11 @@ async function handleModalFileSelect(file, fileType) {
         await showDepthPreview();
         // Show RANSAC checkbox section
         document.getElementById('ransac-checkbox-section').style.display = 'block';
+        const ransacCheckbox = document.getElementById('modal-ransac-checkbox');
+        if (ransacCheckbox && ransacCheckbox.checked) {
+            // Show the spinner and start extraction immediately
+            await showRANSACPreview();
+        }
 
         // Show toggle buttons if RGB is also available
         const hasRGB = modalFiles.rgb instanceof File || modalFiles.rgbFilename;
@@ -615,21 +620,30 @@ async function showRGBPreview() {
     previewDiv.innerHTML = '<div class="spinner"></div><p>Loading RGB preview...</p>';
 
     try {
-        // Check if this is a uint16 depth map
+        // ============================================================
+        // STEP 1: DETERMINE IF WE ARE IN A UINT16 (CROP) SCENARIO
+        // ============================================================
         let isUint16 = false;
 
-        // First check modalPreviewData (from recent upload)
+        // A. Check recent upload data (fastest)
         if (modalPreviewData && modalPreviewData.is_uint16 !== undefined) {
             isUint16 = modalPreviewData.is_uint16;
-        } else {
-            // Otherwise fetch from container data
+        }
+        // B. Check server data (if adding RGB to existing depth)
+        else {
             try {
                 const containerResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}`);
                 const containerData = await containerResponse.json();
                 if (containerData.success) {
                     const panelData = containerData.container.panels[currentModalPanel];
                     if (panelData) {
-                        isUint16 = panelData.is_uint16 || false;
+                        if (currentModalUploadId && panelData.uploads) {
+                            const specificUpload = panelData.uploads.find(u => u.upload_id === currentModalUploadId);
+                            if (specificUpload) isUint16 = specificUpload.is_uint16;
+                            else isUint16 = panelData.is_uint16 || false;
+                        } else {
+                            isUint16 = panelData.is_uint16 || false;
+                        }
                     }
                 }
             } catch (error) {
@@ -637,90 +651,164 @@ async function showRGBPreview() {
             }
         }
 
-        // If uint16, fetch RGB previews from depth preview endpoint (which includes RGB previews)
+        // ============================================================
+        // STEP 2: HANDLE NEW FILE UPLOAD (STAGING PHASE)
+        // ============================================================
+        if (hasNewRGB) {
+
+            // SCENARIO A: Standard Image (Show Local Preview Instant)
+            if (!isUint16) {
+                const reader = new FileReader();
+                const imageData = await new Promise((resolve, reject) => {
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(modalFiles.rgb);
+                });
+
+                previewDiv.innerHTML = `
+                    <div class="preview-image-container">
+                        <img src="${imageData}" alt="RGB Image" style="max-width: 100%; height: auto;">
+                        <p class="preview-caption">RGB Image (Local Preview)</p>
+                    </div>
+                `;
+                return; // Done
+            }
+
+            // SCENARIO B: Uint16 Image (MUST Upload to get Crops)
+            if (isUint16) {
+                const formData = new FormData();
+                formData.append('rgb_file', modalFiles.rgb);
+
+                // --- ✅ FIX START: Send Depth File + Flags to prevent 400 Error ---
+
+                // 1. If we have the depth file locally (Staging phase), send it!
+                // This satisfies servers that demand 'depth_file' in the request.
+                if (modalFiles.depth instanceof File) {
+                    formData.append('depth_file', modalFiles.depth);
+                }
+
+                // 2. Always link to the existing ID
+                if (currentModalUploadId) {
+                    formData.append('upload_id', currentModalUploadId);
+                }
+
+                // 3. Send all flags (mimic the main upload function)
+                const ransacCheckbox = document.getElementById('modal-ransac-checkbox');
+                const rectCheckbox = document.getElementById('modal-rectangular-mask-checkbox');
+
+                formData.append('use_ransac', ransacCheckbox ? ransacCheckbox.checked : true);
+                formData.append('force_rectangular_mask', rectCheckbox ? rectCheckbox.checked : true);
+                // -----------------------------------------------------------------
+
+                let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/upload`;
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                // If upload successful, we can now ask for the generated previews
+                if (data.success) {
+                    // Update global ID if we just created/updated one
+                    if (data.upload_id) currentModalUploadId = data.upload_id;
+
+                    // Now fetch the previews (which will include the crops we just made)
+                    const previewResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/depth/preview?upload_id=${currentModalUploadId}`);
+                    const previewData = await previewResponse.json();
+
+                    if (previewData.success && previewData.previews) {
+                        let html = '';
+                        if (previewData.previews.rgb_original) {
+                            html += `
+                                <div class="preview-image-container">
+                                    <img src="data:image/png;base64,${previewData.previews.rgb_original}" alt="RGB Original">
+                                    <p class="preview-caption">RGB Image (Original) - Red box indicates crop area</p>
+                                </div>`;
+                        }
+                        if (previewData.previews.rgb_cropped) {
+                            html += `
+                                <div class="preview-image-container">
+                                    <img src="data:image/png;base64,${previewData.previews.rgb_cropped}" alt="RGB Cropped">
+                                    <p class="preview-caption">RGB Image (Cropped)</p>
+                                </div>`;
+                        }
+                        previewDiv.innerHTML = html;
+                        return; // Done
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // STEP 3: HANDLE EXISTING FILE (SERVER VIEW PHASE)
+        // ============================================================
+
+        // If isUint16, fetch Dual Previews
         if (isUint16) {
             try {
-                const previewResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/depth/preview`);
+                let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/depth/preview`;
+                if (currentModalUploadId) url += `?upload_id=${currentModalUploadId}`;
+
+                const previewResponse = await fetch(url);
                 const previewData = await previewResponse.json();
 
                 if (previewData.success && previewData.previews) {
                     let html = '';
-
-                    // Show original RGB with crop area
                     if (previewData.previews.rgb_original) {
                         html += `
                             <div class="preview-image-container">
                                 <img src="data:image/png;base64,${previewData.previews.rgb_original}" alt="RGB Original">
                                 <p class="preview-caption">RGB Image (Original) - Red box indicates crop area</p>
-                            </div>
-                        `;
+                            </div>`;
                     }
-
-                    // Show cropped RGB
                     if (previewData.previews.rgb_cropped) {
                         html += `
                             <div class="preview-image-container">
                                 <img src="data:image/png;base64,${previewData.previews.rgb_cropped}" alt="RGB Cropped">
                                 <p class="preview-caption">RGB Image (Cropped)</p>
-                            </div>
-                        `;
+                            </div>`;
                     }
-
                     if (html) {
                         previewDiv.innerHTML = html;
                         return;
                     }
                 }
             } catch (error) {
-                console.error('Error fetching RGB previews from depth endpoint:', error);
-                // Fall through to regular RGB loading
+                console.error('Error fetching uint16 previews:', error);
             }
         }
 
-        // Regular RGB preview (for non-uint16 or fallback)
+        // Standard RGB preview (Fallback)
         let rgbImageData = null;
+        try {
+            let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/rgb`;
+            if (currentModalUploadId) url += `?upload_id=${currentModalUploadId}`;
 
-        // If we have a new RGB file, create preview from File object
-        if (hasNewRGB) {
-            const reader = new FileReader();
-            rgbImageData = await new Promise((resolve, reject) => {
-                reader.onload = (e) => resolve(e.target.result);
-                reader.onerror = reject;
-                reader.readAsDataURL(modalFiles.rgb);
-            });
-        } else {
-            // RGB file exists on server, fetch it
-            try {
-                // Fetch RGB image from server
-                const rgbResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/rgb`);
-                if (rgbResponse.ok) {
-                    const blob = await rgbResponse.blob();
-                    rgbImageData = await new Promise((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onload = (e) => resolve(e.target.result);
-                        reader.onerror = reject;
-                        reader.readAsDataURL(blob);
-                    });
-                } else {
-                    const errorData = await rgbResponse.json();
-                    console.error('Error fetching RGB:', errorData.error);
-                }
-            } catch (error) {
-                console.error('Error fetching RGB from server:', error);
+            const rgbResponse = await fetch(url);
+            if (rgbResponse.ok) {
+                const blob = await rgbResponse.blob();
+                rgbImageData = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blob);
+                });
             }
+        } catch (error) {
+            console.error('Error fetching RGB from server:', error);
         }
 
         if (rgbImageData) {
-            const html = `
+            previewDiv.innerHTML = `
                 <div class="preview-image-container">
                     <img src="${rgbImageData}" alt="RGB Image" style="max-width: 100%; height: auto;">
                     <p class="preview-caption">RGB Image</p>
-                </div>
-            `;
-            previewDiv.innerHTML = html;
+                </div>`;
         } else {
             previewDiv.innerHTML = '<p class="error-message">RGB image not available</p>';
         }
+
     } catch (error) {
         console.error('Error loading RGB preview:', error);
         previewDiv.innerHTML = '<p class="error-message">Error loading RGB preview</p>';
@@ -770,10 +858,6 @@ async function showRANSACPreview() {
                 <div class="ransac-stat-item">
                     <div class="ransac-stat-label">Panel Coverage</div>
                     <div class="ransac-stat-value">${stats.plane_percentage ? stats.plane_percentage.toFixed(1) : 'N/A'}%</div>
-                </div>
-                <div class="ransac-stat-item">
-                    <div class="ransac-stat-label">Threshold</div>
-                    <div class="ransac-stat-value">${stats.residual_threshold_used ? (stats.residual_threshold_used * 1000).toFixed(1) : 'N/A'} mm</div>
                 </div>
             `;
 
@@ -1178,22 +1262,81 @@ async function loadContainers() {
     }
 }
 
-// Display Containers List
+// Display Containers List (Updated Layout)
 function displayContainersList() {
-    const container = document.getElementById('containers-list-container');
+    const containerListEl = document.getElementById('containers-list-container');
+
+    // Sort containers by 'created_at' date in descending order (Newest first)
+    if (containers && containers.length > 0) {
+        containers.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    }
 
     if (containers.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: #6c757d;">No containers created yet.</p>';
+        containerListEl.innerHTML = '<p style="text-align: center; color: #6c757d;">No containers created yet.</p>';
         return;
     }
 
-    container.innerHTML = containers.map(cont => `
-        <div class="container-item" onclick="window.openContainer('${cont.id}')">
-            <h3>${cont.name || cont.id}</h3>
-            <p>ID: ${cont.id}</p>
-            <p>Created: ${new Date(cont.created_at).toLocaleString()}</p>
+    containerListEl.innerHTML = containers.map(cont => {
+        // 1. Calculate Failures
+        let failCount = 0;
+        let totalProcessed = 0;
+
+        if (cont.results) {
+            // Loop through each panel (back, left, right, etc.)
+            Object.values(cont.results).forEach(panelResults => {
+                if (!panelResults) return;
+
+                // Handle potential data structures (legacy single object vs new dictionary)
+                let results = [];
+                if (panelResults.status) {
+                    results = [panelResults]; // Legacy
+                } else {
+                    results = Object.values(panelResults); // New Dictionary format
+                }
+
+                // Count failures
+                results.forEach(res => {
+                    totalProcessed++;
+                    if (res && res.status === 'FAIL') {
+                        failCount++;
+                    }
+                });
+            });
+        }
+
+        // 2. Format Date
+        const dateStr = new Date(cont.created_at).toLocaleString();
+
+        // 3. Render with Flexbox Layout
+        // Left Side: Name & Date
+        // Right Side: Failure Count
+        return `
+        <div class="container-item" onclick="window.openContainer('${cont.id}')" 
+             style="display: flex; justify-content: space-between; align-items: center; padding: 15px;">
+            
+            <div class="container-info">
+                <h3 style="margin: 0 0 5px 0; font-size: 1.1rem;">${cont.name}</h3>
+                <p style="margin: 0; color: #666; font-size: 0.85em;">Created: ${dateStr}</p>
+            </div>
+
+            <div class="container-stats" style="text-align: right;">
+                <span style="
+                    display: inline-block;
+                    padding: 6px 12px;
+                    border-radius: 6px;
+                    background-color: ${failCount > 0 ? '#ffebee' : '#f1f8e9'};
+                    color: ${failCount > 0 ? '#c62828' : '#33691e'};
+                    font-weight: bold;
+                    font-size: 0.9em;
+                    border: 1px solid ${failCount > 0 ? '#ef9a9a' : '#c5e1a5'};
+                ">
+                    ${failCount > 0 ? `⚠️ Failed Detected: ${failCount}` : '✅ No Failures'}
+                </span>
+            </div>
+            
         </div>
-    `).join('');
+        `;
+    }).join('');
 
     // Make openContainer available globally
     window.openContainer = openContainer;
@@ -1352,7 +1495,7 @@ async function openContainer(containerId) {
         }
 
         const data = await response.json();
-        console.log('Open container response:', data); // Debug log
+        console.log('Open container response:', data);
 
         if (data.success) {
             currentContainerId = containerId;
@@ -1363,6 +1506,26 @@ async function openContainer(containerId) {
 
             // Navigate to processing page
             showPage('processing-page');
+
+            // --- ✅ NEW ADDITION: FORCE RESET VIEWER ---
+            const viewer = document.getElementById('results-viewer');
+            const viewerContent = document.getElementById('viewer-content');
+
+            // 1. Hide the viewer sidebar
+            if (viewer) {
+                viewer.classList.remove('active');
+            }
+
+            // 2. Clear stale content and restore placeholder
+            if (viewerContent) {
+                viewerContent.innerHTML = '<p class="viewer-placeholder">Select a result to view details</p>';
+            }
+
+            // 3. Remove "active" highlight from any result items (if they exist)
+            document.querySelectorAll('.result-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            // -------------------------------------------
 
             // Load existing panel data
             await loadPanelData(data.container);
@@ -1721,6 +1884,18 @@ async function processPanel(panelName) {
         } catch (e) { console.warn("Intrinsics upload failed"); }
     }
 
+    const panelThresholds = {
+        'back': 0.03,   // Usually doors (Flat) -> Tight Threshold
+        'door': 0.03,   // Doors (Flat) -> Tight Threshold
+        'left': 0.03,   // Wall (Corrugated) -> Loose Threshold
+        'right': 0.03,  // Wall (Corrugated) -> Loose Threshold
+        'roof': 0.03    // Roof (Corrugated) -> Loose Threshold
+    };
+
+    const activeResidualThreshold = panelThresholds[panelName] || 0.05;
+
+    console.log(`Processing ${panelName}: Using Residual Threshold = ${activeResidualThreshold}m`);
+
     try {
         // --- LOOP THROUGH ALL FILES ---
         for (let i = 0; i < filePairs.length; i++) {
@@ -1734,6 +1909,7 @@ async function processPanel(panelName) {
             const params = {
                 upload_id: pair.upload_id, // <--- CRITICAL: Process this specific ID
                 threshold: parseFloat(document.getElementById('threshold').value),
+                residual_threshold: activeResidualThreshold,
                 use_ransac: true,
                 adaptive_threshold: false,
                 apply_morphological_closing: true,
@@ -1837,7 +2013,7 @@ async function processAllPanels() {
         processAllBtn.textContent = 'Process All';
     }
 }
-// Display Existing Results (for refresh - just show, don't process)
+// Display Existing Results (Updated with "viewer-note" style)
 async function displayExistingResults(panelName, resultData) {
     const resultsDiv = document.getElementById(`${panelName}-results`);
     if (!resultsDiv) return;
@@ -1845,65 +2021,49 @@ async function displayExistingResults(panelName, resultData) {
     // Clear current display
     resultsDiv.innerHTML = '';
 
-    // Normalize data: Make sure we have an ARRAY of results
+    // Normalize data
     let resultsToRender = [];
-
-    // Case A: resultData is the "Results Dictionary" { "uuid1": {...}, "uuid2": {...} }
-    // We detect this by checking if it has keys but NO 'metrics' property at the top level
     if (resultData && !resultData.metrics && !resultData.status) {
-        // Convert dict values to array
         resultsToRender = Object.values(resultData);
-
-        // Sort by timestamp (newest first)
-        resultsToRender.sort((a, b) => {
-            return new Date(b.timestamp || 0) - new Date(a.timestamp || 0);
-        });
-    }
-    // Case B: Legacy/Single result object
-    else if (resultData) {
+        resultsToRender.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+    } else if (resultData) {
         resultsToRender = [resultData];
     }
 
     if (resultsToRender.length === 0) return;
 
-    // --- RENDER LOOP ---
-    // We will render ALL results in the array
     for (const result of resultsToRender) {
-
-        // Get specific preview images for THIS result
-        // Note: This makes a network call for every result. 
-        // Optimization: You could lazy load these or skip previews in the list view.
         let previews = {};
-        try {
-            // We pass upload_id to get the correct preview for this specific result
-            const previewUrl = `${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/preview?upload_id=${result.upload_id}`;
-            const previewResponse = await fetch(previewUrl);
-            const previewData = await previewResponse.json();
-            if (previewData.success) previews = previewData.previews;
-        } catch (e) { console.error("Preview load error", e); }
-
         const metrics = result.metrics || {};
         const status = result.status || 'UNKNOWN';
         const timestamp = result.timestamp || new Date().toISOString();
+        const note = result.note;
 
-        // Create title (try to match upload_id to filename if possible)
+        // 1. Create Title
         let displayTitle = `Result ${new Date(timestamp).toLocaleTimeString()}`;
-        // Try to find filename from our local filePairs list
         if (panelFilePairs[panelName]) {
             const match = panelFilePairs[panelName].find(f => f.upload_id === result.upload_id);
             if (match) displayTitle = match.depth_filename;
         }
 
+        // 2. NOTE LOGIC (Updated to match Viewer style)
+        // We use "viewer-note under-title" to inherit the yellow styling
+        const maxDepthIsNA = !metrics.max_depth_mm || metrics.max_depth_mm === 0;
+        const noteDisplay = (note && !maxDepthIsNA)
+            ? `<div class="viewer-note under-title" style="font-size: 0.85em; margin-bottom: 8px;">${note}</div>`
+            : '';
+
         const resultItem = document.createElement('div');
         resultItem.className = 'result-item';
-        resultItem.style.marginBottom = "10px"; // Add spacing between stacked results
+        resultItem.style.marginBottom = "10px";
         resultItem.dataset.uploadId = result.upload_id;
 
         resultItem.innerHTML = `
             <div class="result-header">
-                <span class="result-title" style="font-size:0.9em">${displayTitle}</span>
+                <span class="result-title" style="font-size:0.95em; font-weight:bold;">${displayTitle}</span>
                 <span class="result-status ${status.toLowerCase()}">${status}</span>
             </div>
+            ${noteDisplay}
             <div class="result-metrics">
                 <div class="result-metric">
                     <span>Max Depth:</span>
@@ -1912,8 +2072,13 @@ async function displayExistingResults(panelName, resultData) {
             </div>
         `;
 
-        // Click handler to open viewer
-        resultItem.addEventListener('click', () => {
+        resultItem.addEventListener('click', async () => {
+            try {
+                const previewUrl = `${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/preview?upload_id=${result.upload_id}`;
+                const previewResponse = await fetch(previewUrl);
+                const previewData = await previewResponse.json();
+                if (previewData.success) previews = previewData.previews;
+            } catch (e) { }
             showResultInViewer(panelName, result, previews);
             document.querySelectorAll('.result-item').forEach(i => i.classList.remove('active'));
             resultItem.classList.add('active');
@@ -1923,62 +2088,43 @@ async function displayExistingResults(panelName, resultData) {
     }
 }
 
-// Display Results (for new processing)
+// Display Results (Immediate Update with "viewer-note" style)
 async function displayResults(panelName, resultData) {
     const resultsDiv = document.getElementById(`${panelName}-results`);
+    if (!resultsDiv) return;
 
-    // Check if element exists (processing page might not be active)
-    if (!resultsDiv) {
-        console.warn(`Results div not found for ${panelName}. Processing page may not be active.`);
-        return;
-    }
-
-    // Get preview images
-    let previews = {};
-    try {
-        const previewResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/preview`);
-        const previewData = await previewResponse.json();
-        if (previewData.success) {
-            previews = previewData.previews;
-        }
-    } catch (error) {
-        console.error('Error loading previews:', error);
-    }
-
-    // Get filename from panel data
     let filename = '';
     try {
         const containerResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}`);
         const containerData = await containerResponse.json();
         if (containerData.success) {
             const panelData = containerData.container.panels[panelName];
-            if (panelData && panelData.depth_filename) {
-                filename = panelData.depth_filename.replace('.npy', '');
+            if (panelData.uploads) {
+                const upload = panelData.uploads.find(u => u.upload_id === resultData.upload_id);
+                if (upload) filename = upload.depth_filename;
             }
         }
-    } catch (error) {
-        console.error('Error loading filename:', error);
-    }
+    } catch (e) { }
 
     const metrics = resultData.metrics || {};
     const status = resultData.status || 'UNKNOWN';
-    const note = resultData.note || null;
+    const note = resultData.note;
     const timestamp = resultData.timestamp || new Date().toISOString();
+    const resultTitle = filename || `Result - ${new Date(timestamp).toLocaleTimeString()}`;
 
-    // Create result item with filename
-    const resultTitle = filename ? `${filename} - ${new Date(timestamp).toLocaleString()}` : `Result - ${new Date(timestamp).toLocaleString()}`;
+    // NOTE LOGIC (Updated to match Viewer style)
+    const maxDepthIsNA = !metrics.max_depth_mm || metrics.max_depth_mm === 0;
+    const noteDisplay = (note && !maxDepthIsNA)
+        ? `<div class="viewer-note under-title" style="font-size: 0.85em; margin-bottom: 8px;">${note}</div>`
+        : '';
 
     const resultItem = document.createElement('div');
     resultItem.className = 'result-item';
     resultItem.dataset.panelName = panelName;
 
-    // Only show note if Max Depth is not N/A (meaning dent was detected)
-    const maxDepthIsNA = !metrics.max_depth_mm || metrics.max_depth_mm === null || metrics.max_depth_mm === undefined || metrics.max_depth_mm === 0;
-    const noteDisplay = (note && !maxDepthIsNA) ? `<div class="result-note">${note}</div>` : '';
-
     resultItem.innerHTML = `
         <div class="result-header">
-            <span class="result-title">${resultTitle}</span>
+            <span class="result-title" style="font-weight:bold;">${resultTitle}</span>
             <span class="result-status ${status.toLowerCase()}">${status}</span>
         </div>
         ${noteDisplay}
@@ -1990,19 +2136,20 @@ async function displayResults(panelName, resultData) {
         </div>
     `;
 
-    // Click handler to show in viewer
     resultItem.addEventListener('click', async () => {
+        let previews = {};
+        try {
+            const previewResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/preview?upload_id=${resultData.upload_id}`);
+            const previewData = await previewResponse.json();
+            if (previewData.success) previews = previewData.previews;
+        } catch (e) { }
+
         await showResultInViewer(panelName, resultData, previews);
-        // Highlight active result
-        document.querySelectorAll('.result-item').forEach(item => {
-            item.classList.remove('active');
-        });
+        document.querySelectorAll('.result-item').forEach(item => item.classList.remove('active'));
         resultItem.classList.add('active');
     });
 
-    // Replace existing results (only one result per panel)
-    resultsDiv.innerHTML = '';
-    resultsDiv.appendChild(resultItem);
+    resultsDiv.prepend(resultItem);
 }
 
 // Show Result in Viewer
@@ -2095,22 +2242,28 @@ async function showResultInViewer(panelName, resultData, previews) {
         console.error('Error loading filename:', error);
     }
 
+    const preprocessedFilename = filename ? `${filename}_preprocessed.npy` : 'preprocessed.npy';
     const maskFilename = filename ? `${filename}_mask.npy` : 'mask.npy';
     const probFilename = filename ? `${filename}_prob.npy` : 'prob.npy';
     const overlayFilename = filename ? `${filename}_overlay.png` : 'overlay.png';
 
+    // Get upload_id from resultData if available
+    const uploadId = resultData.upload_id ? `?upload_id=${resultData.upload_id}` : '';
+
     // Add download buttons
     html += `
         <div class="download-buttons">
-            <a href="${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/mask" 
+            <a href="${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/preprocessed${uploadId}" 
+               class="download-btn" download="${preprocessedFilename}">Download Preprocessed NPY</a>
+            <a href="${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/mask${uploadId}" 
                class="download-btn" download="${maskFilename}">Download Binary Mask</a>
-            <a href="${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/prob" 
+            <a href="${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/prob${uploadId}" 
                class="download-btn" download="${probFilename}">Download Probability Map</a>
     `;
 
     if (resultData.has_overlay) {
         html += `
-            <a href="${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/overlay" 
+            <a href="${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/results/overlay${uploadId}" 
                class="download-btn" download="${overlayFilename}">Download Overlay</a>
         `;
     }
@@ -2260,8 +2413,8 @@ async function loadHistory() {
                             <div class="history-item-info">
                                 <div class="history-item-header">
                                     <div class="history-item-title">
-                                        <div class="history-item-container-id">Container ID: ${item.container_id}</div>
-                                        <div class="history-item-panel-name">${item.container_name} - ${item.panel_name.charAt(0).toUpperCase() + item.panel_name.slice(1)} Panel</div>
+                                        <div class="history-item-container-id">Container ID: ${item.container_name}</div>
+                                        <div class="history-item-panel-name">${item.panel_name.charAt(0).toUpperCase() + item.panel_name.slice(1)} Panel</div>
                                     </div>
                                     <span class="history-item-status ${statusClass}">${status}</span>
                                 </div>

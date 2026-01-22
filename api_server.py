@@ -21,6 +21,7 @@ from panel_extractor import RANSACPanelExtractor, DEFAULT_CLOSING_KERNEL_SIZE, D
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.patches import Rectangle
+from model_architecture import calculate_max_dent_depth_stripes
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend
@@ -274,6 +275,9 @@ def upload_panel_files(container_id, panel_name):
             else:
                 depth_map = depth_data.astype(np.float32)
         
+        # Apply smart hole filling to simulate slopes for fake dents
+        # depth_map = fill_holes_smoothly(depth_map)
+
         # Save processed depth map with unique ID
         processed_depth_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_depth_processed.npy"
         np.save(str(processed_depth_path), depth_map)
@@ -295,8 +299,8 @@ def upload_panel_files(container_id, panel_name):
             # If uint16 depth map, also crop RGB using same crop coordinates
             if is_uint16:
                 H_rgb, W_rgb = rgb_array.shape[:2]
-                left_crop = int(0.20 * W_rgb)
-                right_crop = int(0.80 * W_rgb)
+                left_crop = int(0.10 * W_rgb)
+                right_crop = int(0.60 * W_rgb)
                 top_crop = int(0.1 * H_rgb)
                 bottom_crop = int(0.9 * H_rgb)
 
@@ -452,9 +456,49 @@ def get_upload_data(container_id, panel_name, upload_id=None):
         return uploads[-1]
 
 
+
+def filter_mask_by_depth_stripes(binary_mask, depth_map, threshold_mm):
+    """
+    Filters the mask using the IICL Stripes Method.
+    Ensures that 'What you see is what you measure'.
+    """
+    if threshold_mm is None or threshold_mm <= 0:
+        return binary_mask
+
+    # 1. Ensure depth is in Meters (Stripes method expects meters)
+    depth_map_m = depth_map.copy()
+    if np.nanmax(np.abs(depth_map_m)) > 10.0:
+        depth_map_m /= 1000.0  # Convert mm to m if needed
+        
+    # 2. Analyze each dent blob individually
+    # Connectivity 8 ensures diagonal pixels are connected
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask.astype(np.uint8), connectivity=8)
+    
+    filtered_mask = binary_mask.copy()
+    
+    # 3. Loop through dents (Label 0 is background, so start at 1)
+    for i in range(1, num_labels):
+        # Create a mini-mask for JUST this specific dent
+        # We need this isolation so the measurement only looks at this one dent
+        single_dent_mask = (labels == i).astype(np.uint8) * 255
+        
+        # 4. Measure EXACT Depth using your advanced Stripes logic
+        # This returns depth in METERS
+        max_depth_m = calculate_max_dent_depth_stripes(depth_map_m, single_dent_mask)
+        
+        max_depth_mm = max_depth_m * 1000.0
+        
+        # 5. The Decision: Keep or Kill?
+        if max_depth_mm < threshold_mm:
+            # It is too shallow -> Remove it from the final mask
+            filtered_mask[labels == i] = 0
+            # Optional: Print for debugging
+            # print(f"DEBUG: Removed dent {i} with depth {max_depth_mm:.2f}mm (Threshold: {threshold_mm}mm)")
+            
+    return filtered_mask
+
 @app.route('/api/containers/<container_id>/panels/<panel_name>/process', methods=['POST'])
 def process_panel(container_id, panel_name):
-    """Process a panel (run inference). Accepts optional upload_id to specify which upload to process."""
     if container_id not in containers:
         return jsonify({'error': 'Container not found'}), 404
     
@@ -467,7 +511,7 @@ def process_panel(container_id, panel_name):
     try:
         # Get processing parameters
         data = request.json or {}
-        upload_id = data.get('upload_id')  # Optional upload_id parameter
+        upload_id = data.get('upload_id')
         threshold = data.get('threshold', 0.5)
         use_ransac = data.get('use_ransac', True)
         camera_fov = data.get('camera_fov', DEFAULT_CAMERA_FOV)
@@ -483,36 +527,30 @@ def process_panel(container_id, panel_name):
         outline_thickness = data.get('outline_thickness', 2)
         intrinsics_json_path = data.get('intrinsics_json_path', None)
         
-        # Get upload data (use upload_id if provided, otherwise use most recent)
+        # Get upload data
         upload_data = get_upload_data(container_id, panel_name, upload_id)
         if upload_data is None:
-            return jsonify({'error': f'No upload data found for {panel_name} panel' + (f' with upload_id {upload_id}' if upload_id else '')}), 400
+            return jsonify({'error': f'No upload data found for {panel_name}'}), 400
         
-        # Use RANSAC preferences from upload if not overridden
-        if use_ransac is True:  # Only use upload preference if use_ransac wasn't explicitly set
-            use_ransac = upload_data.get('use_ransac', True)
-        if force_rectangular_mask is True:  # Only use upload preference if not explicitly set
-            force_rectangular_mask = upload_data.get('force_rectangular_mask', True)
+        # Use upload preferences
+        if use_ransac is True: use_ransac = upload_data.get('use_ransac', True)
+        if force_rectangular_mask is True: force_rectangular_mask = upload_data.get('force_rectangular_mask', True)
         
-        # Load depth map from file
+        # Load Data
         depth_map = np.load(upload_data['depth_path'])
         
-        # Load RGB image if available
-        # Prefer cropped RGB if available (for uint16 depth maps) to match cropped depth dimensions
         rgb_array = None
         rgb_cropped_path = upload_data.get('rgb_cropped_path')
         if rgb_cropped_path and os.path.exists(rgb_cropped_path):
             rgb_image = Image.open(rgb_cropped_path)
             rgb_array = np.array(rgb_image)
-            if rgb_array.shape[2] == 4:
-                rgb_array = rgb_array[:, :, :3]
+            if rgb_array.shape[2] == 4: rgb_array = rgb_array[:, :, :3]
         elif upload_data.get('rgb_path'):
             rgb_image = Image.open(upload_data['rgb_path'])
             rgb_array = np.array(rgb_image)
-            if rgb_array.shape[2] == 4:
-                rgb_array = rgb_array[:, :, :3]
+            if rgb_array.shape[2] == 4: rgb_array = rgb_array[:, :, :3]
         
-        # Apply RANSAC if enabled
+        # RANSAC Extraction
         depth_cleaned_precomputed = None
         panel_mask_precomputed = None
         ransac_stats = None
@@ -530,13 +568,13 @@ def process_panel(container_id, panel_name):
             )
             cleaned_depth, panel_mask, ransac_stats, plane_coefficients = extractor.extract_panel(
                 depth_map,
-                fill_background=False  # No median filling - use 0-background for AI model
+                fill_background=False
             )
             depth_cleaned_precomputed = cleaned_depth
             panel_mask_precomputed = panel_mask
         
-        # Run inference
-        binary_mask, prob_mask = predict_mask(
+        # Run AI Inference
+        binary_mask, prob_mask, preprocessed_input = predict_mask(
             model,
             depth_map,
             device=str(device),
@@ -544,46 +582,65 @@ def process_panel(container_id, panel_name):
             depth_cleaned=depth_cleaned_precomputed,
             panel_mask=panel_mask_precomputed
         )
+
+        # --- ✅ FILTER: REMOVE NOISE (Dents < Threshold) ---
+        # Example: If Threshold=10mm, dents < 10mm are deleted. Dents > 10mm remain.
+        if max_depth_threshold is not None and max_depth_threshold > 0:
+            binary_mask = filter_mask_by_depth_stripes(binary_mask, depth_map, max_depth_threshold)
+        # ---------------------------------------------------
         
-        # Calculate metrics
+        # Calculate Metrics
         depth_for_metrics = depth_cleaned_precomputed if depth_cleaned_precomputed is not None else depth_map
-        depth_units_for_metrics = 'meters'
-        
         metrics_kwargs = {
             'depth_map': depth_for_metrics,
             'dent_mask': binary_mask,
             'pixel_to_cm': None,
             'intrinsics_json_path': intrinsics_json_path,
-            'depth_units': depth_units_for_metrics
+            'depth_units': 'meters'
         }
         
         if use_ransac:
             metrics_kwargs['camera_fov'] = camera_fov
-            if panel_mask_precomputed is not None:
-                metrics_kwargs['panel_mask'] = panel_mask_precomputed
-            if plane_coefficients is not None:
-                metrics_kwargs['plane_coefficients'] = plane_coefficients
+            if panel_mask_precomputed is not None: metrics_kwargs['panel_mask'] = panel_mask_precomputed
+            if plane_coefficients is not None: metrics_kwargs['plane_coefficients'] = plane_coefficients
         
         metrics = calculate_dent_metrics(**metrics_kwargs)
         
-        # Determine status
+        # --- ✅ STATUS LOGIC (CORRECTED) ---
         has_dents = metrics['num_defects'] > 0
+        
+        # Area Check
         if metrics['area_valid'] and metrics['area_cm2'] is not None:
             area_pass = metrics['area_cm2'] <= max_area_threshold
         else:
             area_pass = True
         
-        depth_pass = metrics['max_depth_mm'] <= max_depth_threshold
-        
-        # Check if Max Depth is less than 35mm - set to PASS with note
+        status = "PASS"
         note = None
-        if metrics['max_depth_mm'] is not None and metrics['max_depth_mm'] < 35.0:
-            status = "PASS"
-            note = "Pass with minor dent"
-        else:
-            status = "PASS" if (not has_dents or (area_pass and depth_pass)) else "FAIL"
         
-        # Create overlay if RGB image available
+        if not has_dents:
+            # Case 1: No dents found (or all were filtered out because they were < threshold)
+            status = "PASS"
+        else:
+            # We have visible dents (meaning they are > max_depth_threshold)
+            
+            # Rule 1: Is it a "Minor Dent" (< 35mm)?
+            # If so, FORCE PASS regardless of the user threshold
+            if metrics['max_depth_mm'] < 35.0:
+                status = "PASS"
+                note = "Pass with minor dent"
+            
+            # Rule 2: It is > 35mm. Check if it passes area/depth limits
+            # (Note: depth_pass check is technically redundant here if limit is 35mm, 
+            # but good for safety if user threshold is > 35mm)
+            elif area_pass and (metrics['max_depth_mm'] <= max_depth_threshold):
+                 status = "PASS"
+            
+            # Rule 3: It is > 35mm (and likely > threshold). FAIL.
+            else:
+                status = "FAIL"
+
+        # Create Overlay
         overlay_image = None
         if rgb_array is not None:
             overlay_image = create_dent_overlay(
@@ -593,21 +650,21 @@ def process_panel(container_id, panel_name):
                 outline_thickness=outline_thickness
             )
         
-        # Save results to disk with upload_id
+        # Save & Return Results
         upload_id_used = upload_data['upload_id']
         mask_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id_used}_mask.npy"
         prob_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id_used}_prob.npy"
+        preprocessed_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id_used}_preprocessed.npy"
         overlay_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id_used}_overlay.png" if overlay_image is not None else None
         
         np.save(str(mask_path), binary_mask)
         np.save(str(prob_path), prob_mask)
+        np.save(str(preprocessed_path), preprocessed_input)
         
         if overlay_image is not None:
             overlay_pil = Image.fromarray(overlay_image)
             overlay_pil.save(str(overlay_path))
         
-        # Store file paths in results
-        # Convert metrics and ransac_stats to JSON-serializable format
         metrics_stored = convert_numpy_types(metrics)
         ransac_stats_stored = convert_numpy_types(ransac_stats) if ransac_stats is not None else None
         
@@ -617,9 +674,11 @@ def process_panel(container_id, panel_name):
             'threshold': float(threshold),
             'mask_path': str(mask_path),
             'prob_path': str(prob_path),
+            'preprocessed_path': str(preprocessed_path),
             'overlay_path': str(overlay_path) if overlay_path else None,
             'binary_mask_shape': list(binary_mask.shape),
             'prob_mask_shape': list(prob_mask.shape),
+            'preprocessed_shape': list(preprocessed_input.shape),
             'metrics': metrics_stored,
             'status': status,
             'note': note,
@@ -627,41 +686,32 @@ def process_panel(container_id, panel_name):
             'overlay_shape': list(overlay_image.shape) if overlay_image is not None else None
         }
         
-        # Store results keyed by panel_name (can have multiple results per panel if multiple uploads)
         if panel_name not in containers[container_id]['results']:
             containers[container_id]['results'][panel_name] = {}
         containers[container_id]['results'][panel_name][upload_id_used] = result
         
-        # Prepare response (avoid sending full arrays)
-        # Convert numpy types to native Python types
         metrics_clean = {
-            'num_defects': int(metrics['num_defects']) if metrics['num_defects'] is not None else 0,
-            'area_cm2': float(metrics['area_cm2']) if metrics['area_valid'] and metrics['area_cm2'] is not None else None,
+            'num_defects': int(metrics['num_defects']),
+            'area_cm2': float(metrics['area_cm2']) if metrics['area_valid'] and metrics['area_cm2'] else None,
             'area_valid': bool(metrics['area_valid']),
-            'max_depth_mm': float(metrics['max_depth_mm']) if metrics['max_depth_mm'] is not None else 0.0,
-            'avg_depth_mm': float(metrics['avg_depth_mm']) if metrics['avg_depth_mm'] is not None else 0.0,
-            'pixel_count': int(metrics['pixel_count']) if metrics['pixel_count'] is not None else 0
+            'max_depth_mm': float(metrics['max_depth_mm']),
+            'avg_depth_mm': float(metrics['avg_depth_mm']),
+            'pixel_count': int(metrics['pixel_count'])
         }
         
-        # Convert ransac_stats if it exists
-        ransac_stats_clean = None
-        if ransac_stats is not None:
-            ransac_stats_clean = convert_numpy_types(ransac_stats)
-        
-        response = {
+        return jsonify({
             'success': True,
             'message': f'Processing completed for {panel_name} panel',
             'status': status,
             'note': note,
             'metrics': metrics_clean,
-            'ransac_stats': ransac_stats_clean,
+            'ransac_stats': convert_numpy_types(ransac_stats) if ransac_stats else None,
             'has_overlay': overlay_image is not None
-        }
-        
-        return jsonify(response)
+        })
         
     except Exception as e:
         import traceback
+        print(traceback.format_exc())
         return jsonify({
             'error': f'Error processing panel: {str(e)}',
             'traceback': traceback.format_exc()
@@ -759,6 +809,53 @@ def get_prob_mask(container_id, panel_name):
         mimetype='application/octet-stream',
         as_attachment=True,
         download_name=f'{base_filename}_prob.npy'
+    )
+
+
+@app.route('/api/containers/<container_id>/panels/<panel_name>/results/preprocessed', methods=['GET'])
+def get_preprocessed(container_id, panel_name):
+    """Download preprocessed input tensor as .npy file. Accepts optional upload_id query parameter."""
+    if container_id not in containers:
+        return jsonify({'error': 'Container not found'}), 404
+    
+    upload_id = request.args.get('upload_id')  # Optional query parameter
+    
+    if panel_name not in containers[container_id]['results']:
+        return jsonify({'error': 'No results available for this panel'}), 404
+    
+    results = containers[container_id]['results'][panel_name]
+    
+    # If upload_id provided, get specific result; otherwise get most recent
+    if upload_id:
+        result = results.get(upload_id) if isinstance(results, dict) else None
+    else:
+        # Get most recent result (last upload_id in dict)
+        if isinstance(results, dict) and results:
+            result = list(results.values())[-1]
+        elif isinstance(results, dict):
+            result = None
+        else:
+            # Legacy format (single result)
+            result = results
+    
+    if not result:
+        return jsonify({'error': 'No results available for this upload'}), 404
+    
+    preprocessed_path = result.get('preprocessed_path')
+    
+    if not preprocessed_path or not os.path.exists(preprocessed_path):
+        return jsonify({'error': 'Preprocessed file not found'}), 404
+    
+    # Get filename from upload data
+    upload_data = get_upload_data(container_id, panel_name, upload_id or result.get('upload_id'))
+    depth_filename = upload_data.get('depth_filename', 'depth_map.npy') if upload_data else 'depth_map.npy'
+    base_filename = depth_filename.replace('.npy', '')
+    
+    return send_file(
+        preprocessed_path,
+        mimetype='application/octet-stream',
+        as_attachment=True,
+        download_name=f'{base_filename}_preprocessed.npy'
     )
 
 
@@ -1006,8 +1103,8 @@ def get_depth_preview(container_id, panel_name):
             if raw_depth_path.exists():
                 raw_depth = np.load(str(raw_depth_path))
                 H, W = raw_depth.shape
-                left_crop = int(0.20 * W)
-                right_crop = int(0.80 * W)
+                left_crop = int(0.10 * W)
+                right_crop = int(0.60 * W)
                 top_crop = int(0.1 * H)
                 bottom_crop = int(0.9 * H)
                 
@@ -1052,8 +1149,8 @@ def get_depth_preview(container_id, panel_name):
                         rgb_array = rgb_array[:, :, :3]
 
                     H_rgb, W_rgb = rgb_array.shape[:2]
-                    left_crop_rgb = int(0.20 * W_rgb)
-                    right_crop_rgb = int(0.80 * W_rgb)
+                    left_crop_rgb = int(0.10 * W_rgb)
+                    right_crop_rgb = int(0.60 * W_rgb)
                     top_crop_rgb = int(0.1 * H_rgb)
                     bottom_crop_rgb = int(0.9 * H_rgb)
 

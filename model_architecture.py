@@ -488,12 +488,14 @@ def predict_mask(model: nn.Module, depth: np.ndarray, device: str = 'cpu', thres
                     If None, creates mask from valid pixels.
         
     Returns:
-        Tuple of (binary_mask, prob_mask)
+        Tuple of (binary_mask, prob_mask, preprocessed_input)
         - binary_mask: Binary segmentation mask (H, W) as numpy array (0 or 255)
                       Background areas are forced to 0 via hard masking
                       Post-processed to fill holes and remove small components
         - prob_mask: Probability mask (H, W) as numpy array (0.0 to 1.0)
                      Background areas are forced to 0.0 via hard masking
+        - preprocessed_input: Preprocessed input tensor (3, H, W) as numpy array
+                             Contains [normalized_depth, normalized_gx, normalized_gy]
     """
     model.eval()
     original_shape = depth.shape[:2]  # (H, W)
@@ -556,7 +558,7 @@ def predict_mask(model: nn.Module, depth: np.ndarray, device: str = 'cpu', thres
     # Remove small and thin false-positive regions using connected-component analysis
     binary_mask = _filter_thin_components(binary_mask, min_area=min_dent_area)
     
-    return binary_mask, prob_mask
+    return binary_mask, prob_mask, inp
 
 
 def create_dent_overlay(rgb_image: np.ndarray, dent_mask: np.ndarray,

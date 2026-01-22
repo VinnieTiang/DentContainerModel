@@ -23,7 +23,7 @@
     <div class="modal" id="history-modal">
         <div class="modal-content modal-large">
             <div class="modal-header">
-                <h2>Processing History</h2>
+                <h2>Processed History</h2>
                 <button class="btn-close-modal" id="close-history-modal">✕</button>
             </div>
             <div class="modal-body">
@@ -297,8 +297,8 @@
                         <button class="btn-close-modal" id="close-modal">✕</button>
                     </div>
                     <div class="modal-body">
-                        <div class="modal-body-grid">
-                            <div class="modal-section-left">
+                        <div class="modal-top-split" style="display: flex; gap: 20px; margin-bottom: 20px;">
+                            <div class="modal-section-left" style="flex: 1;">
                                 <h3>Upload Files</h3>
                                 <div class="upload-area-modal" data-type="depth">
                                     <div class="upload-placeholder">
@@ -320,7 +320,7 @@
 
                             </div>
 
-                            <div class="modal-section-right">
+                            <div class="modal-section-right" style="flex: 1;">
                                 <h3>Preview</h3>
                                 <div class="preview-toggle-buttons" id="preview-toggle-buttons" style="display: none;">
                                     <button class="btn btn-preview-toggle active" id="toggle-depth"
@@ -334,39 +334,41 @@
                                 <div id="preview-placeholder" class="preview-placeholder">
                                     <p>Upload a depth map to see preview</p>
                                 </div>
+                            </div>
+                        </div>
+                        <!-- Panel Extraction Checkbox (appears under preview) -->
+                        <div id="ransac-checkbox-section"
+                            style="display: none; margin-top: 15px; border-top: 1px solid #eee; padding-top: 15px;">
 
-                                <!-- Panel Extraction Checkbox (appears under preview) -->
-                                <div id="ransac-checkbox-section"
-                                    style="display: none; margin-top: 15px; border-top: 1px solid #eee; padding-top: 15px;">
+                            <div style="display: flex; align-items: center; margin-bottom: 10px;">
+                                <input type="checkbox" id="modal-ransac-checkbox" style="margin-right: 10px;">
+                                <label for="modal-ransac-checkbox" style="font-weight: 500;">Enable Panel
+                                    Extraction (RANSAC)</label>
+                            </div>
 
-                                    <div style="display: flex; align-items: center; margin-bottom: 10px;">
-                                        <input type="checkbox" id="modal-ransac-checkbox" style="margin-right: 10px;">
-                                        <label for="modal-ransac-checkbox" style="font-weight: 500;">Enable Panel
-                                            Extraction (RANSAC)</label>
-                                    </div>
-
-                                    <div id="rectangular-mask-checkbox-label"
-                                        style="display: none; margin-left: 25px; margin-bottom: 15px;">
-                                        <div style="display: flex; align-items: center;">
-                                            <input type="checkbox" id="modal-rectangular-mask-checkbox" checked>
-                                            <label for="modal-rectangular-mask-checkbox"
-                                                style="font-size: 0.9em; color: #555;"> Force Rectangular Mask</label>
-                                        </div>
-                                    </div>
-
-                                    <div id="ransac-preview"
-                                        style="display: none; margin-left: 25px; margin-top: 10px; background: #f9f9f9; padding: 10px; border-radius: 8px;">
-                                        <div id="ransac-stats"
-                                            style="margin-bottom: 10px; font-size: 0.9em; display: flex; gap: 15px;">
-                                        </div>
-                                        <img id="ransac-preview-image" src="" alt="RANSAC Preview"
-                                            style="max-width: 100%; border-radius: 4px; border: 1px solid #ddd; display: none;">
-                                    </div>
-
+                            <div id="rectangular-mask-checkbox-label"
+                                style="display: none; margin-left: 25px; margin-bottom: 15px;">
+                                <div style="display: flex; align-items: center;">
+                                    <input type="checkbox" id="modal-rectangular-mask-checkbox" checked>
+                                    <label for="modal-rectangular-mask-checkbox" style="font-size: 0.9em; color: #555;">
+                                        Force Rectangular Mask</label>
                                 </div>
                             </div>
                         </div>
+
+
+                        <div id="ransac-preview"
+                            style="display: none; margin-left: 25px; margin-top: 10px; background: #f9f9f9; padding: 10px; border-radius: 8px;">
+                            <div id="ransac-stats"
+                                style="margin-bottom: 10px; font-size: 0.9em; display: flex; gap: 15px;">
+                            </div>
+                            <img id="ransac-preview-image" src="" alt="RANSAC Preview"
+                                style="max-width: 100%; border-radius: 4px; border: 1px solid #ddd; display: none;">
+                        </div>
+
                     </div>
+
+
                     <div class="modal-footer">
                         <div class="modal-status" id="modal-status">
                             <span id="status-message">Please upload a depth map (.npy file) to proceed</span>
@@ -378,23 +380,23 @@
                     </div>
                 </div>
             </div>
-        </div>
-    </div>
 
-    <!-- Unified Folder Upload Modal -->
-    <div class="modal" id="unified-upload-modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Unified Folder Upload</h2>
-                <button class="btn-close-modal" id="close-unified-modal">✕</button>
-            </div>
-            <div class="modal-body">
-                <div style="text-align: center; padding: 2rem;">
-                    <p style="margin-bottom: 1rem; color: #666;"><strong>Upload a folder with the following
-                            structure:</strong></p>
-                    <div
-                        style="text-align: left; background: #f5f5f5; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; display: inline-block;">
-                        <code style="color: #333;">
+
+
+            <!-- Unified Folder Upload Modal -->
+            <div class="modal" id="unified-upload-modal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2>Unified Folder Upload</h2>
+                        <button class="btn-close-modal" id="close-unified-modal">✕</button>
+                    </div>
+                    <div class="modal-body">
+                        <div style="text-align: center; padding: 2rem;">
+                            <p style="margin-bottom: 1rem; color: #666;"><strong>Upload a folder with the following
+                                    structure:</strong></p>
+                            <div
+                                style="text-align: left; background: #f5f5f5; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; display: inline-block;">
+                                <code style="color: #333;">
                             folder/<br>
                             &nbsp;&nbsp;├── back/<br>
                             &nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── *.npy<br>
@@ -412,41 +414,47 @@
                             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── *.npy<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── *.png
                         </code>
-                    </div>
-                    <p style="margin-bottom: 1rem; color: #666; font-size: 0.9rem;">Each subfolder should contain a .npy
-                        (depth map) and .png (RGB image) file</p>
-                    <p style="margin-bottom: 2rem; color: #ff9800; font-size: 0.9rem; font-weight: bold;">⚠️ Important:
-                        Select the <strong>parent folder</strong> that contains the subfolders (back/, door/, etc.), not
-                        the subfolders themselves!</p>
-                    <div class="file-upload-area" id="folder-upload-area"
-                        style="min-height: 200px; display: flex; align-items: center; justify-content: center;">
-                        <input type="file" id="folder-input" webkitdirectory directory multiple hidden>
-                        <div class="file-upload-placeholder" id="folder-placeholder">
-                            <span class="upload-icon" style="font-size: 3rem;">📁</span>
-                            <p style="font-size: 1.1rem; margin-top: 1rem;">Drag & drop a folder here</p>
-                            <p class="upload-hint">or click to browse</p>
+                            </div>
+                            <p style="margin-bottom: 1rem; color: #666; font-size: 0.9rem;">Each subfolder should
+                                contain a .npy
+                                (depth map) and .png (RGB image) file</p>
+                            <p style="margin-bottom: 2rem; color: #ff9800; font-size: 0.9rem; font-weight: bold;">⚠️
+                                Important:
+                                Select the <strong>parent folder</strong> that contains the subfolders (back/,
+                                door/,
+                                etc.), not
+                                the subfolders themselves!</p>
+                            <div class="file-upload-area" id="folder-upload-area"
+                                style="min-height: 200px; display: flex; align-items: center; justify-content: center;">
+                                <input type="file" id="folder-input" webkitdirectory directory multiple hidden>
+                                <div class="file-upload-placeholder" id="folder-placeholder">
+                                    <span class="upload-icon" style="font-size: 3rem;">📁</span>
+                                    <p style="font-size: 1.1rem; margin-top: 1rem;">Drag & drop a folder here</p>
+                                    <p class="upload-hint">or click to browse</p>
+                                </div>
+                            </div>
+                            <div id="folder-upload-progress" style="display: none; margin-top: 2rem;">
+                                <div class="spinner"></div>
+                                <p id="folder-upload-status" style="margin-top: 1rem;">Preparing upload...</p>
+                                <div id="folder-upload-details"
+                                    style="margin-top: 1rem; font-size: 0.9rem; color: #666;">
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <div id="folder-upload-progress" style="display: none; margin-top: 2rem;">
-                        <div class="spinner"></div>
-                        <p id="folder-upload-status" style="margin-top: 1rem;">Preparing upload...</p>
-                        <div id="folder-upload-details" style="margin-top: 1rem; font-size: 0.9rem; color: #666;"></div>
+                    <div class="modal-footer">
+                        <div class="modal-status" id="unified-modal-status">
+                            <span id="unified-status-message">Please select a folder to upload</span>
+                        </div>
+                        <div class="modal-footer-buttons">
+                            <button class="btn btn-secondary" id="cancel-unified-upload">Cancel</button>
+                            <button class="btn btn-primary" id="confirm-unified-upload" disabled>Upload All</button>
+                        </div>
                     </div>
                 </div>
             </div>
-            <div class="modal-footer">
-                <div class="modal-status" id="unified-modal-status">
-                    <span id="unified-status-message">Please select a folder to upload</span>
-                </div>
-                <div class="modal-footer-buttons">
-                    <button class="btn btn-secondary" id="cancel-unified-upload">Cancel</button>
-                    <button class="btn btn-primary" id="confirm-unified-upload" disabled>Upload All</button>
-                </div>
-            </div>
-        </div>
-    </div>
 
-    <script src="app.js"></script>
+            <script src="app.js"></script>
 </body>
 
 </html>
