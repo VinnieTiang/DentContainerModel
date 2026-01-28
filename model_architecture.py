@@ -635,19 +635,18 @@ def detect_corrugation_orientation(depth_map):
 def calculate_max_dent_depth_stripes(depth_map_m, mask_binary):
     """
     Measures depth by extending "healthy stripes" across the dent.
-    Input: Depth map in METERS.
-    Robust to: Warping, Bowing, Tilting, and Multi-Corrugations.
+    Returns: (max_severity_total, dent_details_list)
     """
-    if np.sum(mask_binary) == 0: return 0.0
+    if np.sum(mask_binary) == 0: return 0.0, []
     
     # 1. Orientation
     orientation = detect_corrugation_orientation(depth_map_m)
     
     # 2. Process Each Dent Individually
-    # Note: mask_binary might contain multiple dents, but usually we pass one mask at a time
-    # if this function is called per-dent. If passed a full mask, it finds the max depth of ANY dent.
     num_labels, labels = cv2.connectedComponents((mask_binary > 0).astype(np.uint8))
     max_severity_total = 0.0
+    dent_details = [] # Store details here
+    
     H, W = depth_map_m.shape
     
     # Grid for RANSAC
@@ -660,19 +659,19 @@ def calculate_max_dent_depth_stripes(depth_map_m, mask_binary):
         x_min, x_max = np.min(xs), np.max(xs)
         
         # --- 3. EXTRACT THE STRIPE (Scanning) ---
-        scan_margin = 150 # Look far to find healthy metal
+        scan_margin = 80 
         
-        if orientation == "VERTICAL": # Side Walls
+        if orientation == "VERTICAL":
             y_scan_min = max(0, y_min - scan_margin)
             y_scan_max = min(H, y_max + scan_margin)
             x_scan_min, x_scan_max = x_min, x_max 
             
-        elif orientation == "HORIZONTAL": # Roofs
+        elif orientation == "HORIZONTAL":
             y_scan_min, y_scan_max = y_min, y_max
             x_scan_min = max(0, x_min - scan_margin)
             x_scan_max = min(W, x_max + scan_margin)
             
-        else: # Unknown
+        else:
             y_scan_min = max(0, y_min - 50)
             y_scan_max = min(H, y_max + 50)
             x_scan_min = max(0, x_min - 50)
@@ -681,25 +680,11 @@ def calculate_max_dent_depth_stripes(depth_map_m, mask_binary):
         strip_depth = depth_map_m[y_scan_min:y_scan_max, x_scan_min:x_scan_max]
         strip_mask = mask_binary[y_scan_min:y_scan_max, x_scan_min:x_scan_max]
         
-        # Identify Healthy Neighbors
         neighbor_mask = (strip_depth > 0) & (strip_mask == 0)
         
-        # # --- NEW: SAFETY GAP (Prevent Slope Error) ---
-        # # 1. Create a kernel for dilation (Size depends on resolution, 15x15 is approx 1-2cm buffer)
-        # kernel = np.ones((15, 15), np.uint8)
-        
-        # # 2. Expand the dent mask locally to cover the "sloping edges"
-        # # Ensure strip_mask is uint8 for OpenCV
-        # strip_mask_uint8 = strip_mask.astype(np.uint8) 
-        # safety_mask = cv2.dilate(strip_mask_uint8, kernel, iterations=1)
-        
-        # # 3. Identify Healthy Neighbors 
-        # # Must be valid depth (>0) AND outside the expanded Safety Zone
-        # neighbor_mask = (strip_depth > 0) & (safety_mask == 0)
-        # # ---------------------------------------------
         if np.sum(neighbor_mask) < 50: continue
 
-        # --- 4. SURFACE LOGIC (The Bowing Fix) ---
+        # --- 4. SURFACE LOGIC ---
         neighbor_depths = strip_depth[neighbor_mask]
         
         h_c, w_c = strip_depth.shape
@@ -707,17 +692,14 @@ def calculate_max_dent_depth_stripes(depth_map_m, mask_binary):
         X_candidates = np.stack([xx_c[neighbor_mask], yy_c[neighbor_mask]], axis=1)
         y_candidates = neighbor_depths
 
-        # Check Variance (Multi-Wave?)
         depth_range = np.percentile(neighbor_depths, 95) - np.percentile(neighbor_depths, 5)
         
-        if depth_range > 0.015: # >15mm variance = Multi-Wave
-            # Filter for "Peaks" (Closer points)
+        if depth_range > 0.015: 
             threshold = np.percentile(neighbor_depths, 50) 
             is_peak = neighbor_depths <= threshold
             X_train = X_candidates[is_peak]
             y_train = y_candidates[is_peak]
         else:
-            # Single Rail
             X_train = X_candidates
             y_train = y_candidates
 
@@ -734,12 +716,20 @@ def calculate_max_dent_depth_stripes(depth_map_m, mask_binary):
             ideal_depths = reg.predict(X_dent)
             diffs = np.abs(actual_depths - ideal_depths)
             
-            sev = np.percentile(diffs, 95)
+            sev = np.percentile(diffs, 98) # Max depth for this blob
+            
+            # Add to details list
+            dent_details.append({
+                'id': i,
+                'max_depth': float(sev),
+                'bbox': [int(x_min), int(y_min), int(x_max), int(y_max)]
+            })
+
             if sev > max_severity_total: max_severity_total = sev
         except:
             continue
 
-    return max_severity_total
+    return max_severity_total, dent_details
 
 # ---------------------------------------------------------
 # UPDATED: Metric Calculation
@@ -842,27 +832,58 @@ def calculate_dent_metrics(depth_map: np.ndarray, dent_mask: np.ndarray,
     # ---------------------------------------------------------
     max_depth_mm = 0.0
     avg_depth_mm = 0.0
+    individual_dents = [] # New List
     
     if num_dent_pixels > 0:
-        # Call the new Stripes function
-        # It handles bowing, multi-wave, and orientation automatically
-        max_depth_m = calculate_max_dent_depth_stripes(depth_map_m, mask_uint8)
+        # Call updated function (Now returns TUPLE)
+        max_depth_m, dent_details_m = calculate_max_dent_depth_stripes(depth_map_m, mask_uint8)
         
         max_depth_mm = max_depth_m * 1000.0
+        avg_depth_mm = max_depth_mm * 0.6 
         
-        # Approximate average (Stripes method computes max, so we estimate avg roughly)
-        # or just report max as that's the safety metric.
-        avg_depth_mm = max_depth_mm * 0.6 # Rough heuristic or just leave 0
-        
+        # --- PROCESS INDIVIDUAL DENTS (Match depth with area) ---
+        # We need to calculate area for each blob returned by the depth function
+        for dent in dent_details_m:
+            blob_id = dent['id']
+            blob_depth_mm = dent['max_depth'] * 1000.0
+            
+            # Calculate Area for this specific blob
+            blob_mask = (labels == blob_id)
+            blob_pixels = np.sum(blob_mask)
+            blob_area_cm2 = 0.0
+            
+            # Use same area logic as main function
+            if focal_length is not None:
+                # Intrinsics based (approximate using blob depths)
+                dents_z = depth_map_m[blob_mask]
+                valid_z = dents_z[dents_z > 0]
+                if len(valid_z) > 0:
+                     mean_z = np.mean(valid_z)
+                     pixel_size_m = mean_z / focal_length
+                     blob_area_cm2 = blob_pixels * ((pixel_size_m * 100.0) ** 2)
+            elif pixel_to_cm is not None:
+                blob_area_cm2 = blob_pixels * (pixel_to_cm ** 2)
+                
+            individual_dents.append({
+                'id': blob_id,
+                'max_depth_mm': float(blob_depth_mm),
+                'area_cm2': float(blob_area_cm2),
+                'bbox': dent['bbox'] # [x_min, y_min, x_max, y_max]
+            })
+            
+        # Sort by depth descending
+        individual_dents.sort(key=lambda x: x['max_depth_mm'], reverse=True)
+
     return {
         'area_cm2': area_cm2,
         'area_valid': area_valid,
-        'max_depth_mm': float(max_depth_mm), # The robust IICL value
+        'max_depth_mm': float(max_depth_mm),
         'num_defects': num_defects,
         'avg_depth_mm': float(avg_depth_mm),
         'pixel_count': num_dent_pixels,
         'missing_info': missing_info,
-        'area_method': area_method
+        'area_method': area_method,
+        'individual_dents': individual_dents # <--- ADD THIS
     }
 # def load_camera_intrinsics(json_path: Optional[str] = None) -> dict:
 #     """

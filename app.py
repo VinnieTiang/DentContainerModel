@@ -517,8 +517,8 @@ with col1:
                 
                 # Calculate crop coordinates (matching clean_depth_map_uint16)
                 H, W = depth_map_raw.shape
-                left_crop = int(0.10 * W)
-                right_crop = int(0.60 * W)
+                left_crop = int(0.20 * W)
+                right_crop = int(0.80 * W)
                 top_crop = int(0.1 * H)
                 bottom_crop = int(0.9 * H)
                 

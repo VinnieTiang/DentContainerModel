@@ -235,9 +235,162 @@ def list_containers():
     })
 
 
+# @app.route('/api/containers/<container_id>/panels/<panel_name>/upload', methods=['POST'])
+# def upload_panel_files(container_id, panel_name):
+#     """Upload depth map and RGB image for a panel"""
+#     if container_id not in containers:
+#         return jsonify({'error': 'Container not found'}), 404
+    
+#     if panel_name not in ['back', 'left', 'right', 'roof', 'door']:
+#         return jsonify({'error': 'Invalid panel name'}), 400
+    
+#     try:
+#         # Check if files are uploaded
+#         if 'depth_file' not in request.files:
+#             return jsonify({'error': 'No depth file uploaded'}), 400
+        
+#         depth_file = request.files['depth_file']
+#         rgb_file = request.files.get('rgb_file')
+        
+#         # Generate unique upload ID
+#         upload_id = str(uuid.uuid4())
+        
+#         # Save files to disk with unique ID
+#         depth_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_depth.npy"
+#         rgb_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_rgb.png" if rgb_file else None
+        
+#         # Save depth file
+#         depth_file.save(str(depth_path))
+#         depth_data = np.load(str(depth_path))
+        
+#         # Process depth map
+#         original_dtype = depth_data.dtype
+#         is_uint16 = depth_data.dtype == np.uint16 or depth_data.dtype == np.uint32
+        
+#         if is_uint16:
+#             depth_map = clean_depth_map_uint16(depth_data, apply_scale_factor=False)
+#         else:
+#             if depth_data.dtype == np.float16:
+#                 depth_map = depth_data.astype(np.float32)
+#             else:
+#                 depth_map = depth_data.astype(np.float32)
+        
+#         # Apply smart hole filling to simulate slopes for fake dents
+#         # depth_map = fill_holes_smoothly(depth_map)
+
+#         # Save processed depth map with unique ID
+#         processed_depth_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_depth_processed.npy"
+#         np.save(str(processed_depth_path), depth_map)
+        
+#         # Process RGB image if provided
+#         rgb_shape = None
+#         rgb_array = None
+#         rgb_cropped_path = None
+#         rgb_cropped_array = None
+#         if rgb_file:
+#             # Save RGB file (original)
+#             rgb_file.save(str(rgb_path))
+#             rgb_image = Image.open(str(rgb_path))
+#             rgb_array = np.array(rgb_image)
+#             if rgb_array.shape[2] == 4:
+#                 rgb_array = rgb_array[:, :, :3]
+#             rgb_shape = rgb_array.shape
+
+#             # # If uint16 depth map, also crop RGB using same crop coordinates
+#             # if is_uint16:
+#             #     H_rgb, W_rgb = rgb_array.shape[:2]
+#             #     left_crop = int(0 * W_rgb)
+#             #     right_crop = W_rgb
+#             #     top_crop = int(0 * H_rgb)
+#             #     bottom_crop = H_rgb
+
+#             #     # Crop RGB image
+#             #     rgb_cropped_array = rgb_array[top_crop:bottom_crop, left_crop:right_crop].copy()
+
+#             #     # Save cropped RGB with unique ID
+#             #     rgb_cropped_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_rgb_cropped.png"
+#             #     rgb_cropped_image = Image.fromarray(rgb_cropped_array)
+#             #     rgb_cropped_image.save(str(rgb_cropped_path))
+        
+#         # Calculate depth map statistics
+#         valid_pixels = np.sum((depth_map > 0) & np.isfinite(depth_map))
+#         total_pixels = depth_map.size
+#         valid_percentage = (valid_pixels / total_pixels * 100) if total_pixels > 0 else 0
+#         min_depth = float(np.nanmin(depth_map[depth_map > 0])) if valid_pixels > 0 else 0.0
+#         max_depth = float(np.nanmax(depth_map[depth_map > 0])) if valid_pixels > 0 else 0.0
+#         median_depth = float(np.nanmedian(depth_map[depth_map > 0])) if valid_pixels > 0 else 0.0
+        
+#         # Get RANSAC preference from request (if provided)
+#         use_ransac_preference = request.form.get('use_ransac', 'true').lower() == 'true'
+#         force_rectangular_mask_preference = request.form.get('force_rectangular_mask', 'true').lower() == 'true'
+        
+#         # Initialize uploads array if it doesn't exist
+#         if 'uploads' not in containers[container_id]['panels'][panel_name]:
+#             containers[container_id]['panels'][panel_name]['uploads'] = []
+        
+#         # Create upload entry
+#         upload_entry = {
+#             'upload_id': upload_id,
+#             'depth_path': str(processed_depth_path),
+#             'depth_filename': depth_file.filename if hasattr(depth_file, 'filename') else 'depth_map.npy',
+#             'depth_shape': list(depth_map.shape),
+#             'depth_dtype': str(depth_map.dtype),
+#             'original_dtype': str(original_dtype),
+#             'is_uint16': is_uint16,
+#             'rgb_path': str(rgb_path) if rgb_path else None,
+#             'rgb_cropped_path': str(rgb_cropped_path) if rgb_cropped_path else None,
+#             'rgb_filename': rgb_file.filename if rgb_file and hasattr(rgb_file, 'filename') else None,
+#             'rgb_shape': list(rgb_shape) if rgb_shape else None,
+#             'use_ransac': use_ransac_preference,
+#             'force_rectangular_mask': force_rectangular_mask_preference,
+#             'uploaded_at': datetime.now().isoformat(),
+#             'depth_stats': {
+#                 'valid_pixels': int(valid_pixels),
+#                 'total_pixels': int(total_pixels),
+#                 'valid_percentage': float(valid_percentage),
+#                 'min_depth': min_depth,
+#                 'max_depth': max_depth,
+#                 'median_depth': median_depth
+#             }
+#         }
+        
+#         # Append to uploads array
+#         containers[container_id]['panels'][panel_name]['uploads'].append(upload_entry)
+        
+#         # Also update the top-level panel object for backward compatibility with UI
+#         # This ensures the UI sees the "current" active file at panelData.depth_filename
+#         containers[container_id]['panels'][panel_name].update(upload_entry)
+        
+#         return jsonify({
+#             'success': True,
+#             'message': f'Files uploaded for {panel_name} panel',
+#             'upload_id': upload_id,
+#             'depth_filename': depth_file.filename if hasattr(depth_file, 'filename') else 'depth_map.npy',
+#             'rgb_filename': rgb_file.filename if rgb_file and hasattr(rgb_file, 'filename') else None,
+#             'depth_shape': list(depth_map.shape),
+#             'depth_dtype': str(depth_map.dtype),
+#             'original_dtype': str(original_dtype),
+#             'is_uint16': is_uint16,
+#             'rgb_shape': list(rgb_shape) if rgb_shape else None,
+#             'depth_stats': {
+#                 'valid_pixels': int(valid_pixels),
+#                 'total_pixels': int(total_pixels),
+#                 'valid_percentage': float(valid_percentage),
+#                 'min_depth': min_depth,
+#                 'max_depth': max_depth,
+#                 'median_depth': median_depth
+#             }
+#         })
+#     except Exception as e:
+#         import traceback
+#         return jsonify({
+#             'error': f'Error uploading files: {str(e)}',
+#             'traceback': traceback.format_exc()
+#         }), 500
+
 @app.route('/api/containers/<container_id>/panels/<panel_name>/upload', methods=['POST'])
 def upload_panel_files(container_id, panel_name):
-    """Upload depth map and RGB image for a panel"""
+    """Upload depth map and RGB image for a panel (Supports New Uploads & Updates)"""
     if container_id not in containers:
         return jsonify({'error': 'Container not found'}), 404
     
@@ -245,74 +398,98 @@ def upload_panel_files(container_id, panel_name):
         return jsonify({'error': 'Invalid panel name'}), 400
     
     try:
-        # Check if files are uploaded
-        if 'depth_file' not in request.files:
-            return jsonify({'error': 'No depth file uploaded'}), 400
+        # Check if this is an UPDATE (upload_id provided) or NEW upload
+        upload_id = request.form.get('upload_id')
+        is_update = upload_id is not None
         
-        depth_file = request.files['depth_file']
-        rgb_file = request.files.get('rgb_file')
-        
-        # Generate unique upload ID
-        upload_id = str(uuid.uuid4())
-        
-        # Save files to disk with unique ID
-        depth_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_depth.npy"
-        rgb_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_rgb.png" if rgb_file else None
-        
-        # Save depth file
-        depth_file.save(str(depth_path))
-        depth_data = np.load(str(depth_path))
-        
-        # Process depth map
-        original_dtype = depth_data.dtype
-        is_uint16 = depth_data.dtype == np.uint16 or depth_data.dtype == np.uint32
-        
-        if is_uint16:
-            depth_map = clean_depth_map_uint16(depth_data, apply_scale_factor=True)
+        # Validation: New uploads MUST have a depth file
+        if 'depth_file' not in request.files and not is_update:
+            return jsonify({'error': 'No depth file uploaded for new entry'}), 400
+            
+        # Get existing upload data if updating
+        existing_data = None
+        if is_update:
+            existing_data = get_upload_data(container_id, panel_name, upload_id)
+            if not existing_data:
+                return jsonify({'error': 'Upload ID not found for update'}), 404
         else:
-            if depth_data.dtype == np.float16:
-                depth_map = depth_data.astype(np.float32)
+            # Generate new ID for new upload
+            upload_id = str(uuid.uuid4())
+
+        # --- 1. HANDLE DEPTH FILE ---
+        if 'depth_file' in request.files:
+            # NEW Depth File Provided
+            depth_file = request.files['depth_file']
+            
+            # Save files to disk
+            depth_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_depth.npy"
+            processed_depth_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_depth_processed.npy"
+            
+            depth_file.save(str(depth_path))
+            depth_data = np.load(str(depth_path))
+            
+            # Process depth map
+            original_dtype = depth_data.dtype
+            is_uint16 = depth_data.dtype == np.uint16 or depth_data.dtype == np.uint32
+            
+            if is_uint16:
+                depth_map = clean_depth_map_uint16(depth_data, apply_scale_factor=True)
             else:
                 depth_map = depth_data.astype(np.float32)
+            
+            np.save(str(processed_depth_path), depth_map)
+            
+            depth_filename = depth_file.filename
         
-        # Apply smart hole filling to simulate slopes for fake dents
-        # depth_map = fill_holes_smoothly(depth_map)
-
-        # Save processed depth map with unique ID
-        processed_depth_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_depth_processed.npy"
-        np.save(str(processed_depth_path), depth_map)
+        elif is_update:
+            # REUSE Existing Depth File
+            depth_path = Path(existing_data['depth_path'])
+            processed_depth_path = Path(existing_data['depth_path']) # Usually points to processed
+            
+            # Load existing map to get shape/stats
+            depth_map = np.load(str(processed_depth_path))
+            
+            # Preserve existing metadata
+            depth_filename = existing_data.get('depth_filename', 'depth_map.npy')
+            original_dtype = existing_data.get('original_dtype', str(depth_map.dtype))
+            is_uint16 = existing_data.get('is_uint16', False)
         
-        # Process RGB image if provided
+        # --- 2. HANDLE RGB FILE ---
+        rgb_file = request.files.get('rgb_file')
+        rgb_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_rgb.png"
+        
         rgb_shape = None
-        rgb_array = None
+        rgb_filename = None
+        
+        # Initialize cropped variables to None
         rgb_cropped_path = None
         rgb_cropped_array = None
+
         if rgb_file:
-            # Save RGB file (original)
+            # NEW RGB File
             rgb_file.save(str(rgb_path))
             rgb_image = Image.open(str(rgb_path))
             rgb_array = np.array(rgb_image)
             if rgb_array.shape[2] == 4:
                 rgb_array = rgb_array[:, :, :3]
             rgb_shape = rgb_array.shape
+            rgb_filename = rgb_file.filename
+            
+        elif is_update and existing_data.get('rgb_path'):
+            # KEEP Existing RGB
+            rgb_path = Path(existing_data['rgb_path'])
+            if rgb_path.exists():
+                rgb_image = Image.open(str(rgb_path))
+                rgb_array = np.array(rgb_image)
+                rgb_shape = rgb_array.shape
+                rgb_filename = existing_data.get('rgb_filename')
+            else:
+                rgb_path = None # File missing
+        else:
+            # NO RGB
+            rgb_path = None
 
-            # If uint16 depth map, also crop RGB using same crop coordinates
-            if is_uint16:
-                H_rgb, W_rgb = rgb_array.shape[:2]
-                left_crop = int(0.10 * W_rgb)
-                right_crop = int(0.60 * W_rgb)
-                top_crop = int(0.1 * H_rgb)
-                bottom_crop = int(0.9 * H_rgb)
-
-                # Crop RGB image
-                rgb_cropped_array = rgb_array[top_crop:bottom_crop, left_crop:right_crop].copy()
-
-                # Save cropped RGB with unique ID
-                rgb_cropped_path = TEMP_DIR / f"{container_id}_{panel_name}_{upload_id}_rgb_cropped.png"
-                rgb_cropped_image = Image.fromarray(rgb_cropped_array)
-                rgb_cropped_image.save(str(rgb_cropped_path))
-        
-        # Calculate depth map statistics
+        # --- 3. CALCULATE STATS ---
         valid_pixels = np.sum((depth_map > 0) & np.isfinite(depth_map))
         total_pixels = depth_map.size
         valid_percentage = (valid_pixels / total_pixels * 100) if total_pixels > 0 else 0
@@ -320,26 +497,26 @@ def upload_panel_files(container_id, panel_name):
         max_depth = float(np.nanmax(depth_map[depth_map > 0])) if valid_pixels > 0 else 0.0
         median_depth = float(np.nanmedian(depth_map[depth_map > 0])) if valid_pixels > 0 else 0.0
         
-        # Get RANSAC preference from request (if provided)
+        # Get RANSAC preferences
         use_ransac_preference = request.form.get('use_ransac', 'true').lower() == 'true'
         force_rectangular_mask_preference = request.form.get('force_rectangular_mask', 'true').lower() == 'true'
         
         # Initialize uploads array if it doesn't exist
         if 'uploads' not in containers[container_id]['panels'][panel_name]:
             containers[container_id]['panels'][panel_name]['uploads'] = []
-        
-        # Create upload entry
+            
+        # Create Data Object
         upload_entry = {
             'upload_id': upload_id,
             'depth_path': str(processed_depth_path),
-            'depth_filename': depth_file.filename if hasattr(depth_file, 'filename') else 'depth_map.npy',
+            'depth_filename': depth_filename,
             'depth_shape': list(depth_map.shape),
             'depth_dtype': str(depth_map.dtype),
             'original_dtype': str(original_dtype),
             'is_uint16': is_uint16,
             'rgb_path': str(rgb_path) if rgb_path else None,
-            'rgb_cropped_path': str(rgb_cropped_path) if rgb_cropped_path else None,
-            'rgb_filename': rgb_file.filename if rgb_file and hasattr(rgb_file, 'filename') else None,
+            'rgb_cropped_path': None, # We removed cropping
+            'rgb_filename': rgb_filename,
             'rgb_shape': list(rgb_shape) if rgb_shape else None,
             'use_ransac': use_ransac_preference,
             'force_rectangular_mask': force_rectangular_mask_preference,
@@ -354,37 +531,40 @@ def upload_panel_files(container_id, panel_name):
             }
         }
         
-        # Append to uploads array
-        containers[container_id]['panels'][panel_name]['uploads'].append(upload_entry)
+        # Update or Append
+        if is_update:
+            # Find index and replace
+            uploads_list = containers[container_id]['panels'][panel_name]['uploads']
+            for i, u in enumerate(uploads_list):
+                if u['upload_id'] == upload_id:
+                    # Merge to preserve any keys we might have missed (safety)
+                    uploads_list[i].update(upload_entry)
+                    break
+        else:
+            # Append new
+            containers[container_id]['panels'][panel_name]['uploads'].append(upload_entry)
         
-        # Also update the top-level panel object for backward compatibility with UI
-        # This ensures the UI sees the "current" active file at panelData.depth_filename
+        # Update top-level for UI compatibility (shows "latest" active file)
         containers[container_id]['panels'][panel_name].update(upload_entry)
         
         return jsonify({
             'success': True,
-            'message': f'Files uploaded for {panel_name} panel',
+            'message': f'Files {"updated" if is_update else "uploaded"} for {panel_name} panel',
             'upload_id': upload_id,
-            'depth_filename': depth_file.filename if hasattr(depth_file, 'filename') else 'depth_map.npy',
-            'rgb_filename': rgb_file.filename if rgb_file and hasattr(rgb_file, 'filename') else None,
+            'depth_filename': depth_filename,
+            'rgb_filename': rgb_filename,
             'depth_shape': list(depth_map.shape),
             'depth_dtype': str(depth_map.dtype),
             'original_dtype': str(original_dtype),
             'is_uint16': is_uint16,
-            'rgb_shape': list(rgb_shape) if rgb_shape else None,
-            'depth_stats': {
-                'valid_pixels': int(valid_pixels),
-                'total_pixels': int(total_pixels),
-                'valid_percentage': float(valid_percentage),
-                'min_depth': min_depth,
-                'max_depth': max_depth,
-                'median_depth': median_depth
-            }
+            'rgb_shape': list(rgb_shape) if rgb_shape else None
         })
+        
     except Exception as e:
         import traceback
+        traceback.print_exc()
         return jsonify({
-            'error': f'Error uploading files: {str(e)}',
+            'error': f'Error processing upload: {str(e)}',
             'traceback': traceback.format_exc()
         }), 500
 
@@ -462,7 +642,7 @@ def filter_mask_by_depth_stripes(binary_mask, depth_map, threshold_mm):
     Filters the mask using the IICL Stripes Method.
     Ensures that 'What you see is what you measure'.
     """
-    if threshold_mm is None or threshold_mm <= 0:
+    if threshold_mm is None :
         return binary_mask
 
     # 1. Ensure depth is in Meters (Stripes method expects meters)
@@ -484,16 +664,21 @@ def filter_mask_by_depth_stripes(binary_mask, depth_map, threshold_mm):
         
         # 4. Measure EXACT Depth using your advanced Stripes logic
         # This returns depth in METERS
-        max_depth_m = calculate_max_dent_depth_stripes(depth_map_m, single_dent_mask)
+        max_depth_m, _ = calculate_max_dent_depth_stripes(depth_map_m, single_dent_mask)
         
         max_depth_mm = max_depth_m * 1000.0
         
         # 5. The Decision: Keep or Kill?
-        if max_depth_mm < threshold_mm:
-            # It is too shallow -> Remove it from the final mask
+        
+        # FIX 2: Smart Filtering Logic
+        # Condition A: Too Shallow? (Only checking if user set a threshold > 0)
+        is_too_shallow = (threshold_mm > 0) and (max_depth_mm < threshold_mm)
+        
+        # Condition B: Too Deep/Noise? (Always check this)
+        is_noise = (max_depth_mm > 150.0)
+        
+        if is_too_shallow or is_noise:
             filtered_mask[labels == i] = 0
-            # Optional: Print for debugging
-            # print(f"DEBUG: Removed dent {i} with depth {max_depth_mm:.2f}mm (Threshold: {threshold_mm}mm)")
             
     return filtered_mask
 
@@ -585,7 +770,7 @@ def process_panel(container_id, panel_name):
 
         # --- ✅ FILTER: REMOVE NOISE (Dents < Threshold) ---
         # Example: If Threshold=10mm, dents < 10mm are deleted. Dents > 10mm remain.
-        if max_depth_threshold is not None and max_depth_threshold > 0:
+        if max_depth_threshold is not None:
             binary_mask = filter_mask_by_depth_stripes(binary_mask, depth_map, max_depth_threshold)
         # ---------------------------------------------------
         
@@ -640,13 +825,47 @@ def process_panel(container_id, panel_name):
             else:
                 status = "FAIL"
 
-        # Create Overlay
-        overlay_image = None
-        if rgb_array is not None:
-            overlay_image = create_dent_overlay(
-                rgb_array,
-                binary_mask,
-                overlay_alpha=overlay_alpha,
+        # Check if we should prioritize Depth over RGB
+        # (Prioritize depth if it's uint16 raw data, or if RGB is missing)
+        prioritize_depth_overlay = upload_data.get('is_uint16', False) or (rgb_array is None)
+        
+        if prioritize_depth_overlay:
+            # 1. Normalize Depth to 0-255 for visualization
+            # We filter out zeros so they don't skew the normalization
+            valid_mask = depth_map > 0
+            if np.any(valid_mask):
+                min_d, max_d = np.min(depth_map[valid_mask]), np.max(depth_map[valid_mask])
+                norm_depth = np.zeros_like(depth_map, dtype=np.uint8)
+                
+                if max_d > min_d:
+                    # Normalize valid pixels
+                    norm_vals = (depth_map[valid_mask] - min_d) / (max_d - min_d) * 255
+                    norm_depth[valid_mask] = norm_vals.astype(np.uint8)
+                
+                # 2. Colorize (Create a Heatmap) - makes dents easier to see
+                # We use VIRIDIS or JET colormap
+                depth_color = cv2.applyColorMap(norm_depth, cv2.COLORMAP_VIRIDIS)
+                
+                # Ensure background (0 depth) remains black
+                depth_color[~valid_mask] = [0, 0, 0]
+                
+                # 3. Convert BGR to RGB (OpenCV uses BGR, we want RGB)
+                depth_color = cv2.cvtColor(depth_color, cv2.COLOR_BGR2RGB)
+                
+                # 4. Create the Overlay on this Heatmap
+                overlay_image = create_dent_overlay(
+                    depth_color, 
+                    binary_mask, 
+                    overlay_alpha=overlay_alpha, 
+                    outline_thickness=outline_thickness
+                )
+        
+        # Fallback: Use RGB if available and NOT prioritizing depth
+        elif rgb_array is not None:
+             overlay_image = create_dent_overlay(
+                rgb_array, 
+                binary_mask, 
+                overlay_alpha=overlay_alpha, 
                 outline_thickness=outline_thickness
             )
         
@@ -901,29 +1120,47 @@ def upload_intrinsics():
         return jsonify({'error': f'Error uploading file: {str(e)}'}), 500
 
 
+# REPLACE THE EXISTING get_rgb_image FUNCTION WITH THIS:
+
 @app.route('/api/containers/<container_id>/panels/<panel_name>/rgb', methods=['GET'])
 def get_rgb_image(container_id, panel_name):
-    """Get RGB image as PNG. Accepts optional upload_id query parameter."""
+    print(f"\n--- DEBUG RGB REQUEST ---")
+    print(f"Requested: Container={container_id}, Panel={panel_name}")
+
     if container_id not in containers:
+        print("ERROR: Container ID not found in memory.")
         return jsonify({'error': 'Container not found'}), 404
     
-    upload_id = request.args.get('upload_id')  # Optional query parameter
+    upload_id = request.args.get('upload_id')
+    print(f"Requested Upload ID: {upload_id}")
     
     upload_data = get_upload_data(container_id, panel_name, upload_id)
     if upload_data is None:
+        print("ERROR: Upload Data is None (ID mismatch or upload failed).")
+        # Print available uploads to see what exists
+        if panel_name in containers[container_id]['panels']:
+            history = containers[container_id]['panels'][panel_name]['history']
+            print(f"Available Upload IDs: {[u['upload_id'] for u in history]}")
         return jsonify({'error': 'Upload not found'}), 404
     
-    # Prefer cropped RGB if available
-    rgb_path = upload_data.get('rgb_cropped_path') or upload_data.get('rgb_path')
-    if not rgb_path or not os.path.exists(rgb_path):
-        return jsonify({'error': 'RGB image not available'}), 404
-    
-    return send_file(
-        rgb_path,
-        mimetype='image/png',
-        as_attachment=False
-    )
+    # Check paths
+    cropped = upload_data.get('rgb_cropped_path')
+    original = upload_data.get('rgb_path')
+    print(f"Stored Cropped Path: {cropped}")
+    print(f"Stored Original Path: {original}")
 
+    rgb_path = cropped or original
+    
+    if not rgb_path:
+        print("ERROR: Both paths are None in the database.")
+        return jsonify({'error': 'RGB path missing from record'}), 404
+
+    if not os.path.exists(rgb_path):
+        print(f"ERROR: File does not exist on disk at: {rgb_path}")
+        return jsonify({'error': 'RGB file missing from disk'}), 404
+    
+    print(f"SUCCESS: Serving file from {rgb_path}")
+    return send_file(rgb_path, mimetype='image/png', as_attachment=False)
 
 @app.route('/api/containers/<container_id>/panels/<panel_name>/results/overlay', methods=['GET'])
 def get_overlay(container_id, panel_name):
@@ -1103,8 +1340,8 @@ def get_depth_preview(container_id, panel_name):
             if raw_depth_path.exists():
                 raw_depth = np.load(str(raw_depth_path))
                 H, W = raw_depth.shape
-                left_crop = int(0.10 * W)
-                right_crop = int(0.60 * W)
+                left_crop = int(0.20 * W)
+                right_crop = int(0.80 * W)
                 top_crop = int(0.1 * H)
                 bottom_crop = int(0.9 * H)
                 
@@ -1140,71 +1377,91 @@ def get_depth_preview(container_id, panel_name):
                 
                 # If RGB exists, show RGB images (RGB uses PIL which is thread-safe)
                 rgb_path = upload_data.get('rgb_path')
-                rgb_cropped_path = upload_data.get('rgb_cropped_path')
+                # rgb_cropped_path = upload_data.get('rgb_cropped_path')
                 if rgb_path and os.path.exists(rgb_path):
                     # Load original RGB
                     rgb_image = Image.open(rgb_path)
+                    # rgb_array = np.array(rgb_image)
+                    # if rgb_array.shape[2] == 4:
+                    #     rgb_array = rgb_array[:, :, :3]
+
+                    # H_rgb, W_rgb = rgb_array.shape[:2]
+                    # left_crop_rgb = int(0.20 * W_rgb)
+                    # right_crop_rgb = int(0.80 * W_rgb)
+                    # top_crop_rgb = int(0.1 * H_rgb)
+                    # bottom_crop_rgb = int(0.9 * H_rgb)
+
+                    # # Show original RGB with crop area if cropped version exists
+                    # fig_rgb_orig = Figure(figsize=(8, 8))
+                    # canvas_rgb_orig = FigureCanvas(fig_rgb_orig)
+                    # ax_rgb_orig = fig_rgb_orig.add_subplot(111)
+                    # ax_rgb_orig.imshow(rgb_array)
+
+                    # if rgb_cropped_path and os.path.exists(rgb_cropped_path):
+                    #     # Draw bounding box to indicate crop area
+                    #     crop_width_rgb = right_crop_rgb - left_crop_rgb
+                    #     crop_height_rgb = bottom_crop_rgb - top_crop_rgb
+                    #     rect_rgb = Rectangle(
+                    #         (left_crop_rgb, top_crop_rgb),
+                    #         crop_width_rgb,
+                    #         crop_height_rgb,
+                    #         linewidth=3,
+                    #         edgecolor='red',
+                    #         facecolor='none',
+                    #         linestyle='--',
+                    #         label='Crop Area'
+                    #     )
+                    #     ax_rgb_orig.add_patch(rect_rgb)
+                    #     ax_rgb_orig.set_title("RGB Image (Original) - Red box indicates crop area")
+                    #     ax_rgb_orig.legend(loc='upper right', framealpha=0.8)
+                    # else:
+                    #     ax_rgb_orig.set_title("RGB Image (Original)")
+
+                    # ax_rgb_orig.axis('off')
+
+                    # buffer_rgb_orig = io.BytesIO()
+                    # fig_rgb_orig.savefig(buffer_rgb_orig, format='PNG', bbox_inches='tight', dpi=100)
+                    # buffer_rgb_orig.seek(0)
+                    # previews['rgb_original'] = base64.b64encode(buffer_rgb_orig.getvalue()).decode('utf-8')
+
+                    # # Show cropped RGB if available
+                    # if rgb_cropped_path and os.path.exists(rgb_cropped_path):
+                    #     rgb_cropped_image = Image.open(rgb_cropped_path)
+                    #     rgb_cropped_array = np.array(rgb_cropped_image)
+                    #     if rgb_cropped_array.shape[2] == 4:
+                    #         rgb_cropped_array = rgb_cropped_array[:, :, :3]
+
+                    #     fig_rgb_cropped = Figure(figsize=(8, 8))
+                    #     canvas_rgb_cropped = FigureCanvas(fig_rgb_cropped)
+                    #     ax_rgb_cropped = fig_rgb_cropped.add_subplot(111)
+                    #     ax_rgb_cropped.imshow(rgb_cropped_array)
+                    #     ax_rgb_cropped.set_title("RGB Image (Cropped)")
+                    #     ax_rgb_cropped.axis('off')
+
+                    #     buffer_rgb_cropped = io.BytesIO()
+                    #     fig_rgb_cropped.savefig(buffer_rgb_cropped, format='PNG', bbox_inches='tight', dpi=100)
+                    #     buffer_rgb_cropped.seek(0)
+                    #     previews['rgb_cropped'] = base64.b64encode(buffer_rgb_cropped.getvalue()).decode('utf-8')
+
+                    # --- SIMPLIFIED LOGIC START ---
+                    # Just load the image, resize for preview if needed, and send it.
+                    # No rectangles, no cropping.
+                    
+                    fig_rgb = Figure(figsize=(8, 8))
+                    canvas_rgb = FigureCanvas(fig_rgb)
+                    ax_rgb = fig_rgb.add_subplot(111)
+                    
+                    # Convert to array for matplotlib
                     rgb_array = np.array(rgb_image)
-                    if rgb_array.shape[2] == 4:
-                        rgb_array = rgb_array[:, :, :3]
+                    ax_rgb.imshow(rgb_array)
+                    ax_rgb.set_title("RGB Image")
+                    ax_rgb.axis('off')
 
-                    H_rgb, W_rgb = rgb_array.shape[:2]
-                    left_crop_rgb = int(0.10 * W_rgb)
-                    right_crop_rgb = int(0.60 * W_rgb)
-                    top_crop_rgb = int(0.1 * H_rgb)
-                    bottom_crop_rgb = int(0.9 * H_rgb)
-
-                    # Show original RGB with crop area if cropped version exists
-                    fig_rgb_orig = Figure(figsize=(8, 8))
-                    canvas_rgb_orig = FigureCanvas(fig_rgb_orig)
-                    ax_rgb_orig = fig_rgb_orig.add_subplot(111)
-                    ax_rgb_orig.imshow(rgb_array)
-
-                    if rgb_cropped_path and os.path.exists(rgb_cropped_path):
-                        # Draw bounding box to indicate crop area
-                        crop_width_rgb = right_crop_rgb - left_crop_rgb
-                        crop_height_rgb = bottom_crop_rgb - top_crop_rgb
-                        rect_rgb = Rectangle(
-                            (left_crop_rgb, top_crop_rgb),
-                            crop_width_rgb,
-                            crop_height_rgb,
-                            linewidth=3,
-                            edgecolor='red',
-                            facecolor='none',
-                            linestyle='--',
-                            label='Crop Area'
-                        )
-                        ax_rgb_orig.add_patch(rect_rgb)
-                        ax_rgb_orig.set_title("RGB Image (Original) - Red box indicates crop area")
-                        ax_rgb_orig.legend(loc='upper right', framealpha=0.8)
-                    else:
-                        ax_rgb_orig.set_title("RGB Image (Original)")
-
-                    ax_rgb_orig.axis('off')
-
-                    buffer_rgb_orig = io.BytesIO()
-                    fig_rgb_orig.savefig(buffer_rgb_orig, format='PNG', bbox_inches='tight', dpi=100)
-                    buffer_rgb_orig.seek(0)
-                    previews['rgb_original'] = base64.b64encode(buffer_rgb_orig.getvalue()).decode('utf-8')
-
-                    # Show cropped RGB if available
-                    if rgb_cropped_path and os.path.exists(rgb_cropped_path):
-                        rgb_cropped_image = Image.open(rgb_cropped_path)
-                        rgb_cropped_array = np.array(rgb_cropped_image)
-                        if rgb_cropped_array.shape[2] == 4:
-                            rgb_cropped_array = rgb_cropped_array[:, :, :3]
-
-                        fig_rgb_cropped = Figure(figsize=(8, 8))
-                        canvas_rgb_cropped = FigureCanvas(fig_rgb_cropped)
-                        ax_rgb_cropped = fig_rgb_cropped.add_subplot(111)
-                        ax_rgb_cropped.imshow(rgb_cropped_array)
-                        ax_rgb_cropped.set_title("RGB Image (Cropped)")
-                        ax_rgb_cropped.axis('off')
-
-                        buffer_rgb_cropped = io.BytesIO()
-                        fig_rgb_cropped.savefig(buffer_rgb_cropped, format='PNG', bbox_inches='tight', dpi=100)
-                        buffer_rgb_cropped.seek(0)
-                        previews['rgb_cropped'] = base64.b64encode(buffer_rgb_cropped.getvalue()).decode('utf-8')
+                    buffer_rgb = io.BytesIO()
+                    fig_rgb.savefig(buffer_rgb, format='PNG', bbox_inches='tight', dpi=100)
+                    buffer_rgb.seek(0)
+                    previews['rgb_original'] = base64.b64encode(buffer_rgb.getvalue()).decode('utf-8')
+                    # --- SIMPLIFIED LOGIC END ---
         
         return jsonify({
             'success': True,

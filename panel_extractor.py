@@ -55,7 +55,7 @@ def clean_depth_map_uint16(depth: np.ndarray,
     
     for i in range(1, num_labels):
         # If hole is small (e.g., < 50 pixels), mark it for filling
-        if stats[i, cv2.CC_STAT_AREA] < 50:
+        if stats[i, cv2.CC_STAT_AREA] < 500:
             small_holes_mask[labels == i] = 255
 
     # Inpaint ONLY small holes
@@ -103,7 +103,7 @@ def clean_depth_map_uint16(depth: np.ndarray,
     print(f"   Input depth shape: {depth.shape}, dtype: {depth.dtype}")
     print(f"   Input depth range: [{np.nanmin(depth):.4f}, {np.nanmax(depth):.4f}] meters")
     
-    depth_final = cv2.bilateralFilter(depth, d=5, sigmaColor=0.05, sigmaSpace=5.0)
+    depth_final = cv2.bilateralFilter(depth, d=5, sigmaColor=0.1, sigmaSpace=10.0)
     
     print(f"   Output depth range: [{np.nanmin(depth_final):.4f}, {np.nanmax(depth_final):.4f}] meters")
     print("✅ BILATERAL SMOOTHING applied successfully!")

@@ -601,7 +601,221 @@ async function showDepthPreview(specificUploadId = null) {
     }
 }
 
-// Show RGB Preview
+// // Show RGB Preview
+// async function showRGBPreview() {
+//     if (!currentContainerId || !currentModalPanel) return;
+
+//     // Check if we have RGB file
+//     const hasNewRGB = modalFiles.rgb instanceof File;
+//     const hasExistingRGB = modalFiles.rgbFilename && !hasNewRGB;
+
+//     if (!hasNewRGB && !hasExistingRGB) return;
+
+//     const previewSection = document.getElementById('preview-section');
+//     const previewDiv = document.getElementById('modal-preview');
+//     const previewPlaceholder = document.getElementById('preview-placeholder');
+
+//     previewPlaceholder.style.display = 'none';
+//     previewSection.style.display = 'flex';
+//     previewDiv.innerHTML = '<div class="spinner"></div><p>Loading RGB preview...</p>';
+
+//     try {
+//         // ============================================================
+//         // STEP 1: DETERMINE IF WE ARE IN A UINT16 (CROP) SCENARIO
+//         // ============================================================
+//         let isUint16 = false;
+
+//         // A. Check recent upload data (fastest)
+//         if (modalPreviewData && modalPreviewData.is_uint16 !== undefined) {
+//             isUint16 = modalPreviewData.is_uint16;
+//         }
+//         // B. Check server data (if adding RGB to existing depth)
+//         else {
+//             try {
+//                 const containerResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}`);
+//                 const containerData = await containerResponse.json();
+//                 if (containerData.success) {
+//                     const panelData = containerData.container.panels[currentModalPanel];
+//                     if (panelData) {
+//                         if (currentModalUploadId && panelData.uploads) {
+//                             const specificUpload = panelData.uploads.find(u => u.upload_id === currentModalUploadId);
+//                             if (specificUpload) isUint16 = specificUpload.is_uint16;
+//                             else isUint16 = panelData.is_uint16 || false;
+//                         } else {
+//                             isUint16 = panelData.is_uint16 || false;
+//                         }
+//                     }
+//                 }
+//             } catch (error) {
+//                 console.error('Error fetching container data:', error);
+//             }
+//         }
+
+//         // ============================================================
+//         // STEP 2: HANDLE NEW FILE UPLOAD (STAGING PHASE)
+//         // ============================================================
+//         if (hasNewRGB) {
+
+//             // SCENARIO A: Standard Image (Show Local Preview Instant)
+//             if (!isUint16) {
+//                 const reader = new FileReader();
+//                 const imageData = await new Promise((resolve, reject) => {
+//                     reader.onload = (e) => resolve(e.target.result);
+//                     reader.onerror = reject;
+//                     reader.readAsDataURL(modalFiles.rgb);
+//                 });
+
+//                 previewDiv.innerHTML = `
+//                     <div class="preview-image-container">
+//                         <img src="${imageData}" alt="RGB Image" style="max-width: 100%; height: auto;">
+//                         <p class="preview-caption">RGB Image (Local Preview)</p>
+//                     </div>
+//                 `;
+//                 return; // Done
+//             }
+
+//             // SCENARIO B: Uint16 Image (MUST Upload to get Crops)
+//             if (isUint16) {
+//                 const formData = new FormData();
+//                 formData.append('rgb_file', modalFiles.rgb);
+
+//                 // --- ✅ FIX START: Send Depth File + Flags to prevent 400 Error ---
+
+//                 // 1. If we have the depth file locally (Staging phase), send it!
+//                 // This satisfies servers that demand 'depth_file' in the request.
+//                 if (modalFiles.depth instanceof File) {
+//                     formData.append('depth_file', modalFiles.depth);
+//                 }
+
+//                 // 2. Always link to the existing ID
+//                 if (currentModalUploadId) {
+//                     formData.append('upload_id', currentModalUploadId);
+//                 }
+
+//                 // 3. Send all flags (mimic the main upload function)
+//                 const ransacCheckbox = document.getElementById('modal-ransac-checkbox');
+//                 const rectCheckbox = document.getElementById('modal-rectangular-mask-checkbox');
+
+//                 formData.append('use_ransac', ransacCheckbox ? ransacCheckbox.checked : true);
+//                 formData.append('force_rectangular_mask', rectCheckbox ? rectCheckbox.checked : true);
+//                 // -----------------------------------------------------------------
+
+//                 let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/upload`;
+
+//                 const response = await fetch(url, {
+//                     method: 'POST',
+//                     body: formData
+//                 });
+//                 const data = await response.json();
+
+//                 // If upload successful, we can now ask for the generated previews
+//                 if (data.success) {
+//                     // Update global ID if we just created/updated one
+//                     if (data.upload_id) currentModalUploadId = data.upload_id;
+
+//                     // Now fetch the previews (which will include the crops we just made)
+//                     const previewResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/depth/preview?upload_id=${currentModalUploadId}`);
+//                     const previewData = await previewResponse.json();
+
+//                     if (previewData.success && previewData.previews) {
+//                         let html = '';
+//                         if (previewData.previews.rgb_original) {
+//                             html += `
+//                                 <div class="preview-image-container">
+//                                     <img src="data:image/png;base64,${previewData.previews.rgb_original}" alt="RGB Original">
+//                                     <p class="preview-caption">RGB Image (Original) - Red box indicates crop area</p>
+//                                 </div>`;
+//                         }
+//                         if (previewData.previews.rgb_cropped) {
+//                             html += `
+//                                 <div class="preview-image-container">
+//                                     <img src="data:image/png;base64,${previewData.previews.rgb_cropped}" alt="RGB Cropped">
+//                                     <p class="preview-caption">RGB Image (Cropped)</p>
+//                                 </div>`;
+//                         }
+//                         previewDiv.innerHTML = html;
+//                         return; // Done
+//                     }
+//                 }
+//             }
+//         }
+
+//         // ============================================================
+//         // STEP 3: HANDLE EXISTING FILE (SERVER VIEW PHASE)
+//         // ============================================================
+
+//         // If isUint16, fetch Dual Previews
+//         if (isUint16) {
+//             try {
+//                 let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/depth/preview`;
+//                 if (currentModalUploadId) url += `?upload_id=${currentModalUploadId}`;
+
+//                 const previewResponse = await fetch(url);
+//                 const previewData = await previewResponse.json();
+
+//                 if (previewData.success && previewData.previews) {
+//                     let html = '';
+//                     if (previewData.previews.rgb_original) {
+//                         html += `
+//                             <div class="preview-image-container">
+//                                 <img src="data:image/png;base64,${previewData.previews.rgb_original}" alt="RGB Original">
+//                                 <p class="preview-caption">RGB Image (Original) - Red box indicates crop area</p>
+//                             </div>`;
+//                     }
+//                     if (previewData.previews.rgb_cropped) {
+//                         html += `
+//                             <div class="preview-image-container">
+//                                 <img src="data:image/png;base64,${previewData.previews.rgb_cropped}" alt="RGB Cropped">
+//                                 <p class="preview-caption">RGB Image (Cropped)</p>
+//                             </div>`;
+//                     }
+//                     if (html) {
+//                         previewDiv.innerHTML = html;
+//                         return;
+//                     }
+//                 }
+//             } catch (error) {
+//                 console.error('Error fetching uint16 previews:', error);
+//             }
+//         }
+
+//         // Standard RGB preview (Fallback)
+//         let rgbImageData = null;
+//         try {
+//             let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/rgb`;
+//             if (currentModalUploadId) url += `?upload_id=${currentModalUploadId}`;
+
+//             const rgbResponse = await fetch(url);
+//             if (rgbResponse.ok) {
+//                 const blob = await rgbResponse.blob();
+//                 rgbImageData = await new Promise((resolve, reject) => {
+//                     const reader = new FileReader();
+//                     reader.onload = (e) => resolve(e.target.result);
+//                     reader.onerror = reject;
+//                     reader.readAsDataURL(blob);
+//                 });
+//             }
+//         } catch (error) {
+//             console.error('Error fetching RGB from server:', error);
+//         }
+
+//         if (rgbImageData) {
+//             previewDiv.innerHTML = `
+//                 <div class="preview-image-container">
+//                     <img src="${rgbImageData}" alt="RGB Image" style="max-width: 100%; height: auto;">
+//                     <p class="preview-caption">RGB Image</p>
+//                 </div>`;
+//         } else {
+//             previewDiv.innerHTML = '<p class="error-message">RGB image not available</p>';
+//         }
+
+//     } catch (error) {
+//         console.error('Error loading RGB preview:', error);
+//         previewDiv.innerHTML = '<p class="error-message">Error loading RGB preview</p>';
+//     }
+// }
+
+// Show RGB Preview (Simplified - No Cropping)
 async function showRGBPreview() {
     if (!currentContainerId || !currentModalPanel) return;
 
@@ -620,194 +834,56 @@ async function showRGBPreview() {
     previewDiv.innerHTML = '<div class="spinner"></div><p>Loading RGB preview...</p>';
 
     try {
-        // ============================================================
-        // STEP 1: DETERMINE IF WE ARE IN A UINT16 (CROP) SCENARIO
-        // ============================================================
-        let isUint16 = false;
-
-        // A. Check recent upload data (fastest)
-        if (modalPreviewData && modalPreviewData.is_uint16 !== undefined) {
-            isUint16 = modalPreviewData.is_uint16;
-        }
-        // B. Check server data (if adding RGB to existing depth)
-        else {
-            try {
-                const containerResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}`);
-                const containerData = await containerResponse.json();
-                if (containerData.success) {
-                    const panelData = containerData.container.panels[currentModalPanel];
-                    if (panelData) {
-                        if (currentModalUploadId && panelData.uploads) {
-                            const specificUpload = panelData.uploads.find(u => u.upload_id === currentModalUploadId);
-                            if (specificUpload) isUint16 = specificUpload.is_uint16;
-                            else isUint16 = panelData.is_uint16 || false;
-                        } else {
-                            isUint16 = panelData.is_uint16 || false;
-                        }
-                    }
-                }
-            } catch (error) {
-                console.error('Error fetching container data:', error);
-            }
-        }
-
-        // ============================================================
-        // STEP 2: HANDLE NEW FILE UPLOAD (STAGING PHASE)
-        // ============================================================
+        // SCENARIO 1: NEW FILE (Show Local Preview Instantly)
         if (hasNewRGB) {
+            const reader = new FileReader();
+            const imageData = await new Promise((resolve, reject) => {
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(modalFiles.rgb);
+            });
 
-            // SCENARIO A: Standard Image (Show Local Preview Instant)
-            if (!isUint16) {
-                const reader = new FileReader();
-                const imageData = await new Promise((resolve, reject) => {
-                    reader.onload = (e) => resolve(e.target.result);
-                    reader.onerror = reject;
-                    reader.readAsDataURL(modalFiles.rgb);
-                });
-
-                previewDiv.innerHTML = `
-                    <div class="preview-image-container">
-                        <img src="${imageData}" alt="RGB Image" style="max-width: 100%; height: auto;">
-                        <p class="preview-caption">RGB Image (Local Preview)</p>
-                    </div>
-                `;
-                return; // Done
-            }
-
-            // SCENARIO B: Uint16 Image (MUST Upload to get Crops)
-            if (isUint16) {
-                const formData = new FormData();
-                formData.append('rgb_file', modalFiles.rgb);
-
-                // --- ✅ FIX START: Send Depth File + Flags to prevent 400 Error ---
-
-                // 1. If we have the depth file locally (Staging phase), send it!
-                // This satisfies servers that demand 'depth_file' in the request.
-                if (modalFiles.depth instanceof File) {
-                    formData.append('depth_file', modalFiles.depth);
-                }
-
-                // 2. Always link to the existing ID
-                if (currentModalUploadId) {
-                    formData.append('upload_id', currentModalUploadId);
-                }
-
-                // 3. Send all flags (mimic the main upload function)
-                const ransacCheckbox = document.getElementById('modal-ransac-checkbox');
-                const rectCheckbox = document.getElementById('modal-rectangular-mask-checkbox');
-
-                formData.append('use_ransac', ransacCheckbox ? ransacCheckbox.checked : true);
-                formData.append('force_rectangular_mask', rectCheckbox ? rectCheckbox.checked : true);
-                // -----------------------------------------------------------------
-
-                let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/upload`;
-
-                const response = await fetch(url, {
-                    method: 'POST',
-                    body: formData
-                });
-                const data = await response.json();
-
-                // If upload successful, we can now ask for the generated previews
-                if (data.success) {
-                    // Update global ID if we just created/updated one
-                    if (data.upload_id) currentModalUploadId = data.upload_id;
-
-                    // Now fetch the previews (which will include the crops we just made)
-                    const previewResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/depth/preview?upload_id=${currentModalUploadId}`);
-                    const previewData = await previewResponse.json();
-
-                    if (previewData.success && previewData.previews) {
-                        let html = '';
-                        if (previewData.previews.rgb_original) {
-                            html += `
-                                <div class="preview-image-container">
-                                    <img src="data:image/png;base64,${previewData.previews.rgb_original}" alt="RGB Original">
-                                    <p class="preview-caption">RGB Image (Original) - Red box indicates crop area</p>
-                                </div>`;
-                        }
-                        if (previewData.previews.rgb_cropped) {
-                            html += `
-                                <div class="preview-image-container">
-                                    <img src="data:image/png;base64,${previewData.previews.rgb_cropped}" alt="RGB Cropped">
-                                    <p class="preview-caption">RGB Image (Cropped)</p>
-                                </div>`;
-                        }
-                        previewDiv.innerHTML = html;
-                        return; // Done
-                    }
-                }
-            }
-        }
-
-        // ============================================================
-        // STEP 3: HANDLE EXISTING FILE (SERVER VIEW PHASE)
-        // ============================================================
-
-        // If isUint16, fetch Dual Previews
-        if (isUint16) {
-            try {
-                let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/depth/preview`;
-                if (currentModalUploadId) url += `?upload_id=${currentModalUploadId}`;
-
-                const previewResponse = await fetch(url);
-                const previewData = await previewResponse.json();
-
-                if (previewData.success && previewData.previews) {
-                    let html = '';
-                    if (previewData.previews.rgb_original) {
-                        html += `
-                            <div class="preview-image-container">
-                                <img src="data:image/png;base64,${previewData.previews.rgb_original}" alt="RGB Original">
-                                <p class="preview-caption">RGB Image (Original) - Red box indicates crop area</p>
-                            </div>`;
-                    }
-                    if (previewData.previews.rgb_cropped) {
-                        html += `
-                            <div class="preview-image-container">
-                                <img src="data:image/png;base64,${previewData.previews.rgb_cropped}" alt="RGB Cropped">
-                                <p class="preview-caption">RGB Image (Cropped)</p>
-                            </div>`;
-                    }
-                    if (html) {
-                        previewDiv.innerHTML = html;
-                        return;
-                    }
-                }
-            } catch (error) {
-                console.error('Error fetching uint16 previews:', error);
-            }
-        }
-
-        // Standard RGB preview (Fallback)
-        let rgbImageData = null;
-        try {
-            let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/rgb`;
-            if (currentModalUploadId) url += `?upload_id=${currentModalUploadId}`;
-
-            const rgbResponse = await fetch(url);
-            if (rgbResponse.ok) {
-                const blob = await rgbResponse.blob();
-                rgbImageData = await new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = (e) => resolve(e.target.result);
-                    reader.onerror = reject;
-                    reader.readAsDataURL(blob);
-                });
-            }
-        } catch (error) {
-            console.error('Error fetching RGB from server:', error);
-        }
-
-        if (rgbImageData) {
             previewDiv.innerHTML = `
                 <div class="preview-image-container">
-                    <img src="${rgbImageData}" alt="RGB Image" style="max-width: 100%; height: auto;">
-                    <p class="preview-caption">RGB Image</p>
-                </div>`;
-        } else {
-            previewDiv.innerHTML = '<p class="error-message">RGB image not available</p>';
+                    <img src="${imageData}" alt="RGB Image" style="max-width: 100%; height: auto;">
+                    <p class="preview-caption">RGB Image (Local Preview)</p>
+                </div>
+            `;
+            return;
         }
+
+        // SCENARIO 2: EXISTING FILE (Fetch from Server)
+        let rgbImageData = null;
+        try {
+            // We use the 'rgb_original' preview endpoint if available, or raw download
+            // Let's try to get the preview generated by api_server.py first (base64)
+            let url = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/depth/preview`;
+            if (currentModalUploadId) url += `?upload_id=${currentModalUploadId}`;
+
+            const previewResponse = await fetch(url);
+            const previewData = await previewResponse.json();
+
+            if (previewData.success && previewData.previews && previewData.previews.rgb_original) {
+                previewDiv.innerHTML = `
+                    <div class="preview-image-container">
+                        <img src="data:image/png;base64,${previewData.previews.rgb_original}" alt="RGB Image">
+                        <p class="preview-caption">RGB Image</p>
+                    </div>`;
+                return;
+            }
+        } catch (error) {
+            console.warn('Failed to fetch RGB preview base64, falling back to raw image', error);
+        }
+
+        // Fallback: Fetch raw image URL
+        let rawUrl = `${API_BASE_URL}/containers/${currentContainerId}/panels/${currentModalPanel}/rgb`;
+        if (currentModalUploadId) rawUrl += `?upload_id=${currentModalUploadId}`;
+
+        previewDiv.innerHTML = `
+            <div class="preview-image-container">
+                <img src="${rawUrl}" alt="RGB Image" style="max-width: 100%; height: auto;">
+                <p class="preview-caption">RGB Image</p>
+            </div>`;
 
     } catch (error) {
         console.error('Error loading RGB preview:', error);
@@ -900,25 +976,33 @@ function checkReadyStatus() {
 async function confirmUpload() {
     if (!currentContainerId || !currentModalPanel) return;
 
-    // Store panel name before closing modal (since closeModal sets currentModalPanel to null)
+    // Store panel name
     const panelName = currentModalPanel;
-
-    // Check if we have a File object (new upload) or existing file (via depthFilename)
-    const hasNewFile = modalFiles.depth instanceof File;
-    const hasExistingFile = modalFiles.depthFilename && !hasNewFile;
-
-    // If button says "Close", just close the modal
     const confirmBtn = document.getElementById('confirm-upload');
+
+    // Close check
     if (confirmBtn.textContent === 'Close') {
         closeModal();
         await updatePanelDisplay(panelName);
         return;
     }
 
-    if (!hasNewFile && !hasExistingFile) return;
+    // --- FIX START ---
+    // Check for ANY new file (Depth OR RGB)
+    const hasNewDepth = modalFiles.depth instanceof File;
+    const hasNewRGB = modalFiles.rgb instanceof File;
+    const isUpdate = currentModalUploadId !== null;
+
+    // We proceed if:
+    // 1. It's a completely new upload (New Depth required)
+    // 2. It's an update AND we have at least one new file (Depth OR RGB)
+    const shouldUpload = (hasNewDepth) || (isUpdate && hasNewRGB);
+
+    if (!shouldUpload && !isUpdate) return; // Nothing to do
+    // -----------------
 
     confirmBtn.disabled = true;
-    confirmBtn.textContent = hasNewFile ? 'Uploading...' : 'Updating...';
+    confirmBtn.textContent = isUpdate ? 'Updating...' : 'Uploading...';
 
     try {
         // Check if container exists
@@ -946,18 +1030,31 @@ async function confirmUpload() {
             return;
         }
 
-        // If we have new files, upload them
-        if (hasNewFile) {
+        if (shouldUpload) {
+            // CASE 1: Uploading Files (New or Update)
             const formData = new FormData();
-            formData.append('depth_file', modalFiles.depth);
-            if (modalFiles.rgb instanceof File) {
+
+            // Append Depth if new
+            if (hasNewDepth) {
+                formData.append('depth_file', modalFiles.depth);
+            }
+
+            // Append RGB if new
+            if (hasNewRGB) {
                 formData.append('rgb_file', modalFiles.rgb);
             }
-            // Store RANSAC checkbox state from modal
+
+            // Always append RANSAC settings
             const ransacCheckbox = document.getElementById('modal-ransac-checkbox');
             const rectangularMaskCheckbox = document.getElementById('modal-rectangular-mask-checkbox');
             formData.append('use_ransac', ransacCheckbox ? ransacCheckbox.checked : true);
             formData.append('force_rectangular_mask', rectangularMaskCheckbox ? rectangularMaskCheckbox.checked : true);
+
+            // --- FIX: Pass upload_id if updating ---
+            if (isUpdate) {
+                formData.append('upload_id', currentModalUploadId);
+            }
+            // --------------------------------------
 
             const response = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/upload`, {
                 method: 'POST',
@@ -966,141 +1063,90 @@ async function confirmUpload() {
 
             if (!response.ok) {
                 const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-                if (response.status === 404) {
-                    showNotification(`Container ${currentContainerId} not found. The server may have been restarted. Please create a new container.`, 'error');
-                    confirmBtn.textContent = hasNewFile ? 'Upload Files' : 'Update';
-                    return;
-                }
                 throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
             }
 
             const data = await response.json();
 
             if (data.success) {
-                showNotification(`Files uploaded for ${panelName} panel`, 'success');
-
-                // Store upload response data for preview
+                showNotification(`Files ${isUpdate ? 'updated' : 'uploaded'} for ${panelName}`, 'success');
                 modalPreviewData = data;
 
-                // Add new file pair to the panel's file pairs array (append instead of replace)
-                const newFilePair = {
-                    upload_id: data.upload_id,  // Store upload_id from backend
-                    depth_filename: data.depth_filename || null,
-                    depth_shape: data.depth_shape || [],
-                    rgb_filename: data.rgb_filename || null,
-                    rgb_shape: data.rgb_shape || null,
-                    uploaded_at: new Date().toISOString()
-                };
+                // If it was a NEW upload (not update), add to list
+                // If it was an UPDATE, we assume the backend updated the existing record, 
+                // but we should refresh our local list to match.
 
-                // Initialize array if it doesn't exist
-                if (!panelFilePairs[panelName]) {
-                    panelFilePairs[panelName] = [];
-                }
-
-                // Append the new file pair
-                panelFilePairs[panelName].push(newFilePair);
-
-                // Update modal file display with actual filenames
-                if (data.depth_filename) {
-                    modalFiles.depthFilename = data.depth_filename;
-                    const depthArea = document.querySelector('.upload-area-modal[data-type="depth"]');
-                    if (depthArea) {
-                        depthArea.classList.add('has-file');
-                        depthArea.querySelector('.upload-placeholder').innerHTML = `
-                            <span class="upload-icon">✅</span>
-                            <p class="file-name">${data.depth_filename}</p>
-                            <p class="upload-hint">File uploaded - Click to change</p>
-                        `;
-                    }
-                }
-                if (data.rgb_filename) {
-                    modalFiles.rgbFilename = data.rgb_filename;
-                    const rgbArea = document.querySelector('.upload-area-modal[data-type="rgb"]');
-                    if (rgbArea) {
-                        rgbArea.classList.add('has-file');
-                        rgbArea.querySelector('.upload-placeholder').innerHTML = `
-                            <span class="upload-icon">✅</span>
-                            <p class="file-name">${data.rgb_filename}</p>
-                            <p class="upload-hint">File uploaded - Click to change</p>
-                        `;
+                if (!isUpdate) {
+                    // Create new entry logic (same as before)
+                    const newFilePair = {
+                        upload_id: data.upload_id,
+                        depth_filename: data.depth_filename || null,
+                        depth_shape: data.depth_shape || [],
+                        rgb_filename: data.rgb_filename || null,
+                        rgb_shape: data.rgb_shape || null,
+                        uploaded_at: new Date().toISOString()
+                    };
+                    if (!panelFilePairs[panelName]) panelFilePairs[panelName] = [];
+                    panelFilePairs[panelName].push(newFilePair);
+                } else {
+                    // It was an update: Update local array entry
+                    if (panelFilePairs[panelName]) {
+                        const idx = panelFilePairs[panelName].findIndex(p => p.upload_id === currentModalUploadId);
+                        if (idx !== -1) {
+                            panelFilePairs[panelName][idx].depth_filename = data.depth_filename;
+                            panelFilePairs[panelName][idx].rgb_filename = data.rgb_filename;
+                        }
                     }
                 }
 
-                // Show RANSAC checkbox section if depth file exists
-                if (data.depth_filename) {
-                    document.getElementById('ransac-checkbox-section').style.display = 'block';
-                }
+                // UI Updates (keep existing logic)
+                if (data.depth_filename) modalFiles.depthFilename = data.depth_filename;
+                if (data.rgb_filename) modalFiles.rgbFilename = data.rgb_filename;
 
-                // Show toggle buttons if RGB is also available
-                const hasRGB = data.rgb_filename || modalFiles.rgb instanceof File;
-                if (hasRGB) {
-                    document.getElementById('preview-toggle-buttons').style.display = 'flex';
-                }
-
-                // Clear File objects since they're now uploaded
+                // Clear file objects
                 modalFiles.depth = null;
                 modalFiles.rgb = null;
 
-                // Refresh preview after upload
-                // If uint16 and RGB exists, automatically show RGB preview (which includes cropped RGB)
-                if (data.is_uint16 && hasRGB) {
-                    // Switch to RGB preview toggle
-                    document.getElementById('toggle-rgb').classList.add('active');
-                    document.getElementById('toggle-depth').classList.remove('active');
-                    // Show RGB preview (will show both original and cropped)
-                    await showRGBPreview();
-                } else {
-                    // Otherwise show depth preview
-                    await showDepthPreview();
+                // Show toggle buttons if RGB available
+                if (data.rgb_filename) {
+                    document.getElementById('preview-toggle-buttons').style.display = 'flex';
                 }
 
-                // Update panel display but keep modal open so user can see preview
-                await updatePanelDisplay(panelName);
+                // Refresh preview
+                await showDepthPreview(currentModalUploadId);
 
-                // Re-enable confirm button and change text since files are uploaded
+                await updatePanelDisplay(panelName);
                 confirmBtn.disabled = false;
                 confirmBtn.textContent = 'Close';
             } else {
-                showNotification(data.error || 'Failed to upload files', 'error');
-                confirmBtn.disabled = false;
-                confirmBtn.textContent = 'Upload';
+                throw new Error(data.error || 'Failed');
             }
         } else {
-            // Files already exist, update RANSAC preference if changed
+            // CASE 2: No new files, just updating RANSAC settings
+            // (Keep existing update-ransac logic here)
             const ransacCheckbox = document.getElementById('modal-ransac-checkbox');
             const rectangularMaskCheckbox = document.getElementById('modal-rectangular-mask-checkbox');
+
             if (ransacCheckbox) {
-                try {
-                    const updateResponse = await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/update-ransac`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            use_ransac: ransacCheckbox.checked,
-                            force_rectangular_mask: rectangularMaskCheckbox ? rectangularMaskCheckbox.checked : true
-                        })
-                    });
-
-                    const updateData = await updateResponse.json();
-                    if (updateData.success) {
-                        showNotification(`RANSAC preference updated for ${panelName} panel`, 'success');
-                    } else {
-                        console.warn('Failed to update RANSAC preference:', updateData.error);
-                    }
-                } catch (error) {
-                    console.warn('Error updating RANSAC preference:', error);
-                }
+                await fetch(`${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/update-ransac`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        upload_id: currentModalUploadId,
+                        use_ransac: ransacCheckbox.checked,
+                        force_rectangular_mask: rectangularMaskCheckbox ? rectangularMaskCheckbox.checked : true
+                    })
+                });
+                showNotification(`RANSAC settings updated`, 'success');
             }
-
             closeModal();
             await updatePanelDisplay(panelName);
         }
     } catch (error) {
-        console.error('Error uploading files:', error);
-        showNotification('Failed to upload files. Make sure the API server is running.', 'error');
+        console.error('Error uploading:', error);
+        showNotification(error.message || 'Failed to upload', 'error');
         confirmBtn.disabled = false;
-        confirmBtn.textContent = hasNewFile ? 'Upload' : 'Update';
+        confirmBtn.textContent = isUpdate ? 'Update' : 'Upload';
     }
 }
 
@@ -1178,10 +1224,18 @@ async function updatePanelDisplay(panelName) {
 
             // --- 1. RENDER FILE LIST ---
             // Ensure file pairs array exists
-            if (!panelFilePairs[panelName]) {
+            if (panelData && panelData.uploads) {
+                panelFilePairs[panelName] = panelData.uploads.map(upload => ({
+                    upload_id: upload.upload_id,
+                    depth_filename: upload.depth_filename || 'depth_map.npy',
+                    depth_shape: upload.depth_shape || [],
+                    rgb_filename: upload.rgb_filename || null,
+                    rgb_shape: upload.rgb_shape || null,
+                    uploaded_at: upload.uploaded_at || new Date().toISOString()
+                }));
+            } else {
                 panelFilePairs[panelName] = [];
             }
-
             const filePairs = panelFilePairs[panelName];
             let html = '';
 
@@ -2190,12 +2244,101 @@ async function showResultInViewer(panelName, resultData, previews) {
         </div>
     `;
 
+    // --- NEW: Per-Dent Breakdown ---
+    if (metrics.individual_dents && metrics.individual_dents.length > 0) {
+        html += `
+            <div class="dent-breakdown-section" style="margin-top: 15px; background: #fff; padding: 10px; border-radius: 8px; border: 1px solid #eee;">
+                <h5 style="margin: 0 0 10px 0; color: #333; font-size: 0.95em;">🔍 Dent Details (${metrics.individual_dents.length} found)</h5>
+                <div style="max-height: 150px; overflow-y: auto;">
+                    <table style="width: 100%; font-size: 0.85em; border-collapse: collapse;">
+                        <thead style="background: #f9f9f9; color: #666;">
+                            <tr>
+                                <th style="text-align: left; padding: 5px;">#</th>
+                                <th style="text-align: right; padding: 5px;">Depth</th>
+                                <th style="text-align: right; padding: 5px;">Area</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${metrics.individual_dents.map((dent, idx) => `
+                                <tr style="border-bottom: 1px solid #eee;">
+                                    <td style="padding: 5px;">Dent ${idx + 1}</td>
+                                    <td style="text-align: right; padding: 5px; font-weight: bold; color: ${dent.max_depth_mm > 50 ? '#d32f2f' : '#333'}">
+                                        ${dent.max_depth_mm.toFixed(1)} mm
+                                    </td>
+                                    <td style="text-align: right; padding: 5px; color: #666;">
+                                        ${dent.area_cm2.toFixed(1)} cm²
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+
+    // Add preview images - show overlay first if RGB is available
     // Add preview images - show overlay first if RGB is available
     if (previews.overlay) {
+        // Calculate interactive boxes if we have bbox data
+        let interactiveBoxesHtml = '';
+
+        // We need image dimensions to calculate percentages
+        // binary_mask_shape is usually [Height, Width]
+        const imgDims = resultData.binary_mask_shape || resultData.preprocessed_shape;
+
+        if (metrics.individual_dents && imgDims && imgDims.length === 2) {
+            const H = imgDims[0];
+            const W = imgDims[1];
+
+            interactiveBoxesHtml = metrics.individual_dents.map((dent, idx) => {
+                if (!dent.bbox) return '';
+
+                const [x_min, y_min, x_max, y_max] = dent.bbox;
+
+                // Calculate percentages for responsive positioning
+                const left = (x_min / W) * 100;
+                const top = (y_min / H) * 100;
+                const width = ((x_max - x_min) / W) * 100;
+                const height = ((y_max - y_min) / H) * 100;
+
+                // Tooltip content
+                const tooltipText = `Dent ${idx + 1}\nDepth: ${dent.max_depth_mm.toFixed(1)}mm\nArea: ${dent.area_cm2.toFixed(1)}cm²`;
+
+                return `
+                    <div class="dent-interactive-box" 
+                         style="left: ${left}%; top: ${top}%; width: ${width}%; height: ${height}%;"
+                         title="${tooltipText}">
+                         <span class="dent-label">${idx + 1}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
         html += `
             <div class="preview-image-container">
-                <h5>🎨 Dent Overlay on RGB Image</h5>
-                <img src="data:image/png;base64,${previews.overlay}" alt="Overlay" class="viewer-image">
+                <h5>🎨 Dent Segment Overlay (Hover for Details)</h5>
+                <div class="interactive-wrapper" style="position: relative; display: inline-block; width: 100%;">
+                    <img src="data:image/png;base64,${previews.overlay}" alt="Overlay" class="viewer-image" style="display: block; width: 100%;">
+                    ${interactiveBoxesHtml}
+                </div>
+            </div>
+        `;
+    }
+
+    // --- 2. NEW: INSERT REFERENCE RGB HERE ---
+    // This places the specific RGB photo right under the overlay
+    if (resultData.upload_id) {
+        const rgbUrl = `${API_BASE_URL}/containers/${currentContainerId}/panels/${panelName}/rgb?upload_id=${resultData.upload_id}`;
+
+        html += `
+            <div class="preview-image-container">
+                <h5>📸 Reference RGB (Original)</h5>
+                <img src="${rgbUrl}" 
+                     alt="Reference RGB" 
+                     class="viewer-image"
+                     style="max-height: 300px; object-fit: contain;" 
+                     onerror="this.parentElement.style.display='none'">
             </div>
         `;
     }
@@ -3182,6 +3325,41 @@ style.textContent = `
             transform: translateX(400px);
             opacity: 0;
         }
+    }
+
+    /* Interactive Dent Map */
+    .dent-interactive-box {
+        position: absolute;
+        border: 2px solid transparent; /* Invisible by default */
+        cursor: help;
+        transition: all 0.2s ease;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    /* Show box on hover */
+    .dent-interactive-box:hover {
+        border-color: #FFEB3B; /* Bright Yellow border */
+        background-color: rgba(255, 235, 59, 0.2); /* Semi-transparent yellow fill */
+        box-shadow: 0 0 8px rgba(0,0,0,0.5);
+    }
+
+    /* The little number label inside */
+    .dent-label {
+        font-size: 10px;
+        color: white;
+        background: rgba(0,0,0,0.7);
+        padding: 1px 4px;
+        border-radius: 4px;
+        opacity: 0; /* Hidden by default */
+        transition: opacity 0.2s;
+        pointer-events: none;
+    }
+
+    .dent-interactive-box:hover .dent-label {
+        opacity: 1; /* Show number on hover */
     }
 `;
 document.head.appendChild(style);
